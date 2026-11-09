@@ -19,20 +19,19 @@
 ## 环境要求
 
 1. **Python ≥ 3.10** — 分析与建库脚本只用标准库，无需 pip install。
-2. **Node ≥ 18** — 仅 `scripts/bulk-page.mjs`（网页表格批量提取）及其测试需要。
+2. **Node ≥ 18** — `scripts/rpa/`（RPA 抓取）需要，首次运行先 `node scripts/rpa/setup.mjs` 装 playwright 到本地 `.tools/`。
 3. **浏览器自动化工具** — 你的助手环境必须能把用户**已登录**的 FastMoss 标签页接入 Playwright 风格的 DOM 操作（如 Claude Code 的浏览器 MCP 工具、Codex/Workbuddy 环境自带的浏览器工具）。各环境工具名不同，接入方式见 [references/browser-workflow.md](references/browser-workflow.md)——先发现可用工具，不假设别人环境的扩展。
 4. **网络可达 `www.fastmoss.com`**，且用户已在浏览器中登录 FastMoss。
-
-## 首次自检（复制后先跑一遍）
-
-```bash
-python -m unittest discover -s scripts -p "test_*.py"   # 应 9 个测试全过
-node scripts/test-bulk-page.mjs                          # 应 1 个测试通过
-```
 
 ## 常用命令
 
 ```bash
+# 完整抓取 + 分析（RPA 主路径）
+node scripts/rpa/setup.mjs            # 首次：装 playwright 到 .tools/
+node scripts/rpa/login-window.mjs     # 弹窗登录一次（登录态存 .browser-profile/）
+node scripts/rpa/fastmoss-rpa.mjs pipeline --pages 60 --top 18 --follower 5000,50000 --category 7 --out-dir outputs/<批次>
+node scripts/rpa/analyze.mjs --dir outputs/<批次> --top 10   # 出 JSON + 多维度分析报告.md
+
 # 历史带货分析：网页采集 evidence.json 后
 python scripts/history_analysis.py outputs/<批次>/evidence.json --output outputs/<批次>
 
@@ -42,7 +41,10 @@ python scripts/creator_pool.py search "包包、粉丝2–10w、报价≤8k"
 python scripts/creator_pool.py profiles
 ```
 
-`bulk-page.mjs` 不单独命令行运行：由助手在浏览器工具的 JS 执行面里调用 `collectTables(tab)` / `creatorRows(tables)`，用法见 [references/fast-execution.md](references/fast-execution.md)。
+`bulk-page.mjs` / `collect-pages.mjs` 是旧的浏览器内执行脚本（已被 RPA 取代，保留兼容）：由助手在浏览器工具的 JS 执行面里调用。
+
+- `collectTables(tab)` / `creatorRows(tables)`——单页整表提取与按ID去重。
+- `pagesScript({maxPages})`——返回一段 JS，一次调用内完成多页点击、等待、提取与去重；`toPoolRecords(payload)` 转成入库记录并带 coverage。RPA 出现前的翻页方案，现仅作参考。
 
 ## 目录结构
 
@@ -51,7 +53,8 @@ SKILL.md          # 能力定义与执行流程（唯一入口，先读这个）
 references/       # 分场景执行手册：fast-execution / browser-workflow /
                   # history-workflow / live-workflow / local-pool / data-and-roadmap
 scripts/          # history_analysis.py、creator_pool.py（纯标准库）
-                  # bulk-page.mjs（浏览器内执行）+ 配套测试
+                  # bulk-page.mjs / collect-pages.mjs（旧浏览器内脚本，兼容保留）
+                  # rpa/（RPA 主路径：fastmoss-rpa.mjs + analyze.mjs + setup/login）
 operations/       # 每次实际执行的记录（日期、条件、结果、阻碍）
 outputs/          # 任务产物，git 忽略，不入库
 AGENTS.md / CLAUDE.md / GEMINI.md   # 各工具入口路由

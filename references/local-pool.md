@@ -6,7 +6,6 @@
 python scripts/creator_pool.py import outputs/批次/creators.json
 python scripts/creator_pool.py search "包包、粉丝2–10w、报价≤8k"
 python scripts/creator_pool.py profiles
-python -m unittest discover -s scripts -p test_*.py
 ```
 
 输入为 JSON 数组。必填：`id`（字符串稳定ID）、`collected_at`（带时区ISO时间，统一使用同一时区）、`source_url`、`country`、`currency`、`period_days`。可选：`name`、`handle`、`followers`、`gmv`、`units`、`quote`、`content_tags`、`audience`、`conversion_rate`、`return_rate`、`sentiment`。缺失用 null，不填0。附加字段原样保存在快照中。导入前逐项比对网页原文，不把预估值填入实际值。

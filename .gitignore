@@ -17,3 +17,8 @@ node_modules/
 Thumbs.db
 *.log
 .env
+
+# 浏览器自动化环境（本地依赖与登录态，绝不入库）
+.tools/
+.browser-profile/
+.playwright-cli/
