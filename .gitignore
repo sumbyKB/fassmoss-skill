@@ -1,0 +1,19 @@
+# AIOS / ContextDB 运行状态（会话、检查点、事件日志）
+.aios/
+.contextdb-enable
+
+# 本地工具配置
+.claude/settings.local.json
+.gemini/
+
+# 任务产物（报告、名单、下载、截图）
+outputs/
+
+# 常见临时文件
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+.env
