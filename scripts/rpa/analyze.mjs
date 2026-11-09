@@ -3,7 +3,10 @@
  * 离线分析：把 RPA 抓下来的 candidates.json / details.json 变成
  * creators-final.json、summary-metrics.json、competitor-shops.json、evidence/<id>.json
  *
- *   node scripts/rpa/analyze.mjs --dir outputs/2026-11-09-us-bags-review [--top 10]
+ *   node scripts/rpa/analyze.mjs --dir outputs/2026-11-09-us-bags-review [--top 10] [--currency THB]
+ *
+ * 币种：默认自动读 details.json / candidates.json 的 meta.currency（RPA 抓取时写入，
+ * 泰国站=THB 等），也可显式 --currency THB 覆盖。金额符号（$ ฿ Rp ₫ 等）随之切换。
  *
  * 原则：只做确定性计算与字段搬运；未知字段留 null，不用 0 顶替；
  * GMV÷销量 只称“件均销售额”，不称订单客单价。
@@ -23,12 +26,17 @@ const TOP = Number(getArg('top', 10));
 const legacyPeriod = getArg('period', null);
 const targetProducts = new Set(getArg('competitor-products', '').split(',').filter(Boolean));
 
-const BAG = /箱包|手袋|钱包|托特|双肩包|斜挎包|单肩包|手拿包|手拎包|化妆包|洗漱包|\b(?:handbags?|totes?|backpacks?|purses?|bags?|satchels?|clutches)\b/i;
-const REVIEW = /(review|unbox|honest|worth it|tested|\btest\b|\bvs\b|dupe|comparison|测评|实测|开箱|haul|优缺点|pros and cons|which one|quality|for less|girl math)/i;
+// 币种符号映射（RPA 已把 country/currency 写进 meta，这里从 meta 自动读取，缺省 USD）
+const CURRENCY_SYMBOL = { USD: '$', THB: '฿', IDR: 'Rp', VND: '₫', MYR: 'RM', PHP: '₱', JPY: '¥', SGD: 'S$', MXN: 'MX$', BRL: 'R$' };
+const symbolOf = (c) => CURRENCY_SYMBOL[c] || (c ? c + ' ' : '$');
+
+const BAG = /箱包|手袋|钱包|托特|双肩包|斜挎包|单肩包|手拿包|手拎包|化妆包|洗漱包|\b(?:handbags?|totes?|backpacks?|purses?|bags?|satchels?|clutches)\b|กระเป๋า|ถุง|ย่าม/i;
+const REVIEW = /(review|unbox|honest|worth it|tested|\btest\b|\bvs\b|dupe|comparison|测评|实测|开箱|haul|优缺点|pros and cons|which one|quality|for less|girl math|รีวิว|บอกต่อ|ใช้ดี|คุ้ม|ทดลอง|เทียบ|ถูกและดี|ของดี|รีวิวจริง)/i;
 
 const num = (s) => {
   if (s === null || s === undefined) return null;
-  let t = String(s).replace(/[$,+\s]/g, '');
+  // 剥离货币符号（$ ฿ Rp ₫ ₱ ¥ € £ S$ MX$ R$）与千分位逗号/空格；泰国站金额形如 ฿424.17万
+  let t = String(s).replace(/[$,฿₫₱¥€£\s]|Rp|S\$|MX\$|R\$/g, '');
   if (!t || /^-+$/.test(t)) return null;
   let mult = 1;
   if (/亿$/.test(t)) { mult = 1e8; t = t.slice(0,-1); }
@@ -38,7 +46,7 @@ const num = (s) => {
 };
 const priceMid = (s) => {
   if (!s) return null;
-  const m = String(s).replace(/[$,]/g, '').match(/\d+(\.\d+)?/g);
+  const m = String(s).replace(/[$,฿₫₱¥€£\s]|Rp|S\$|MX\$|R\$/g, '').match(/\d+(\.\d+)?/g);
   if (!m) return null;
   const a = m.map(Number);
   return +(((a[0] + (a[1] ?? a[0])) / 2).toFixed(2));
@@ -162,6 +170,9 @@ const candidates = JSON.parse(fs.readFileSync(path.join(DIR, 'candidates.json'),
 const detailsFile = path.join(DIR, 'details.json');
 if (!fs.existsSync(detailsFile)) throw new Error('缺 details.json，请先跑 pipeline');
 const details = JSON.parse(fs.readFileSync(detailsFile, 'utf8'));
+// 币种：优先显式 --currency，否则读 RPA 写进 meta 的 currency（泰国站=THB 等），兜底 USD
+const CURRENCY = getArg('currency', null) || details.meta?.currency || candidates.meta?.currency || 'USD';
+const SYM = symbolOf(CURRENCY);
 const periodOf = t => t?.dates?.length === 2 ? t.dates.join('/') : t?.period || legacyPeriod || '周期未核实';
 const PERIOD = [...new Set(details.details.flatMap(d => (d.tables || []).filter(t => t.headers.some(h => ['视频销量','直播销量'].includes(h))).map(periodOf)))].join('、') || '周期未核实';
 
@@ -208,7 +219,7 @@ for (const c of topList) {
   for (const v of c.videos) {
     if (!v.id) continue;
     records.push({
-      kind: 'video', id: v.id, source_url: v.href, period: v.period, currency: 'USD',
+      kind: 'video', id: v.id, source_url: v.href, period: v.period, currency: CURRENCY,
       published_at: v.date, video_type: v.type,
       units: v.units, gmv: v.gmv, views: v.views, views_scope_verified: false,
       title: v.title.slice(0, 300), product_text: (v.product || '').slice(0, 200),
@@ -218,7 +229,7 @@ for (const c of topList) {
     if (!l.id) continue;
     const sec = l.duration ? l.duration.split(':').reduce((a, b) => a * 60 + Number(b), 0) : null;
     records.push({
-      kind: 'live', id: l.id, source_url: l.href, period: l.period, currency: 'USD',
+      kind: 'live', id: l.id, source_url: l.href, period: l.period, currency: CURRENCY,
       started_at: l.date, units: l.units, gmv: l.gmv,
       listed_product_count: l.products, active_product_count: l.soldProducts,
       viewer_visits: l.viewers, duration_seconds: sec,
@@ -230,7 +241,7 @@ for (const c of topList) {
   const file = periods.length > 1 ? c.id + '-' + (index+1) : c.id;
   fs.writeFileSync(path.join(evDir, file + '.json'), JSON.stringify({
     creator_id: c.id, creator_name: c.name, source_url: c.url,
-    collected_at: details.meta?.collected_at || null, currency: 'USD', period,
+    collected_at: details.meta?.collected_at || null, currency: CURRENCY, period,
     coverage: `视频列表前 ${c.videos.length} 条 + 直播列表前 ${c.lives.length} 场（${PERIOD}，非全量）`,
     platform_period_note: '以逐条记录周期为准',
     records: records.filter(r=>r.period===period), comments: [], comment_note: '页面仅显示评论数量，未获得正文，情绪不判定', products_complete: false,
@@ -255,7 +266,7 @@ console.log(rows.join('\n'));
  * 原则：报告里的数字全部从 creators 数据算出来，不硬编码；定性分级用规则函数判定。
  * ====================================================================== */
 
-const fmtMoney = (n) => (n == null ? '—' : '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 }));
+const fmtMoney = (n) => (n == null ? '—' : SYM + n.toLocaleString('en-US', { maximumFractionDigits: 0 }));
 const fmtWan = (n) => (n == null ? '—' : (n / 1e4).toFixed(1) + '万');
 const pct = (n) => (n == null ? '—' : n + '%');
 const orDash = (x) => (x == null || x === '' ? '—' : x);
@@ -509,7 +520,7 @@ function renderReport(creators, competitor, opts) {
 }
 
 const reportMd = renderReport(creators, competitor, {
-  dir: DIR, period: PERIOD, currency: 'USD',
+  dir: DIR, period: PERIOD, currency: CURRENCY,
   follower: candidates.meta?.filters?.follower || '5000,50000',
   category: candidates.meta?.filters?.sale_category_l1 || '7',
   top: TOP,

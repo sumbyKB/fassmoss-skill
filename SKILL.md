@@ -7,6 +7,25 @@ description: 在用户已登录的 FastMoss 网页中按自然语言条件搜索
 
 默认执行 [references/fast-execution.md](references/fast-execution.md) 的 RPA 流程：`scripts/rpa/fastmoss-rpa.mjs` 一条命令抓完列表+详情落盘，`scripts/rpa/analyze.mjs` 离线分析并**自动生成统一结构的多维度分析报告**。先抓数据，再分析；速度不能替代数据核验。
 
+## 国家站点切换（重要）
+
+FastMoss 达人搜索默认美国站，国家切换通过右上角「国家按钮 → 弹层选国家」完成，**选择结果持久化到登录态（.browser-profile），URL 上不带 country 参数**，所以每次抓取前都要显式切一次（幂等，已是目标国则跳过）。
+
+```bash
+# 单独切站（持久化，供其他人先切站再用别的子命令）
+node scripts/rpa/fastmoss-rpa.mjs country 泰国      # 泰国站，币种自动切 THB
+node scripts/rpa/fastmoss-rpa.mjs country 美国      # 回美国站，USD
+
+# 抓取时顺带切站（推荐，一条命令搞定）
+node scripts/rpa/fastmoss-rpa.mjs pipeline --country 泰国 --follower 2000,50000 --category 7 --pages 60 --top 10
+node scripts/rpa/fastmoss-rpa.mjs search --country 印尼 --follower 5000,50000 --category 7 --pages 30
+node scripts/rpa/fastmoss-rpa.mjs detail --country 越南 --ids-file ids.json
+```
+
+支持国家与币种（中文名或英文/ISO 代码均可）：美国(us/USD)、泰国(th/THB)、印尼(IDR)、越南(VND)、马来西亚(MYR)、菲律宾(PHP)、日本(JPY)、新加坡(SGD)、英国(USD)、德国(USD)、法国(USD)、西班牙(USD)、意大利(USD)、墨西哥(MXN)、巴西(BRL)。币种会自动写入产物 meta（`candidates.json` / `details.json` 的 `meta.currency`、`meta.country`），`analyze.mjs` 会读取该币种自动切换报告金额符号（`$`/`฿`/`Rp`/`₫` 等），也可显式 `--currency THB` 覆盖。
+
+> **泰国站注意**：金额单位是泰铢 `฿`，脚本 `MV` 与 `analyze.mjs` 的 `num()` 金额解析对「万」和「฿」符号都兼容（`num()` 会剥离 `$`/`+`/空格，泰国站列表金额形如 `฿424.17万` 会被正确解析为 424.17 万泰铢）。
+
 本地建库、检索和档案工具见 [references/local-pool.md](references/local-pool.md)。自然语言由本技能拆解并在网页核验，脚本的有限规则解析不替代全条件验证。每批网页证据转为标准JSON后入库，保留历史快照和缺失字段。
 
 通过用户已登录的浏览器操作 FastMoss，不要求 API。先读当前页面，再填写筛选条件，验证生效后整理结果。不要把页面可读误报为自动搜索已经完成。

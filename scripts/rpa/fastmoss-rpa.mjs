@@ -16,6 +16,11 @@
  *   node scripts/rpa/fastmoss-rpa.mjs detail  --ids 123,456 --out details.json
  *   node scripts/rpa/fastmoss-rpa.mjs detail  --ids-file ids.json --concurrency 6 --out details.json
  *   node scripts/rpa/fastmoss-rpa.mjs pipeline --follower 5000,50000 --category 7 --pages 60 --top 18 --out-dir outputs/xxx
+ *
+ * 切换国家（国家选择持久化到 profile，URL 不带参数）：
+ *   node scripts/rpa/fastmoss-rpa.mjs country 泰国        # 单独切站（泰国=THB）
+ *   node scripts/rpa/fastmoss-rpa.mjs pipeline ... --country 泰国   # 抓取时顺带切站
+ *   支持：美国(us) 泰国(th) 印尼 越南 马来西亚 菲律宾 日本 新加坡 英国 德国 法国 西班牙 意大利 墨西哥 巴西
  */
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
@@ -43,18 +48,79 @@ const BASE = 'https://www.fastmoss.com/zh';
 const PROFILE_DIR = path.join(SKILL_ROOT, '.browser-profile');
 const DEFAULT_UA = undefined;
 
+/**
+ * 国家站点映射：`--country` 的值 → 页面右上角国家切换按钮的显示文本 + 该站币种。
+ * 国家切换是「点右上角国家按钮 → 弹层里点国家名」，选择结果持久化到登录态（profile），
+ * URL 上不带 country 参数，所以每次抓取前都要显式切换一次（幂等）。
+ * 币种：美国/英/德/法/西/意 = USD；泰国 = THB；印尼 = IDR；越南 = VND；马来 = MYR；日本 = JPY；新加坡 = SGD；菲律宾 = PHP；墨西哥 = MXN；巴西 = BRL。
+ */
+const COUNTRIES = {
+  '美国':       { label: '美国',       currency: 'USD' },
+  'us':         { label: '美国',       currency: 'USD' },
+  'usa':        { label: '美国',       currency: 'USD' },
+  'united states': { label: '美国',    currency: 'USD' },
+  '泰国':       { label: '泰国',       currency: 'THB' },
+  'th':         { label: '泰国',       currency: 'THB' },
+  'thailand':   { label: '泰国',       currency: 'THB' },
+  '印尼':       { label: '印尼',       currency: 'IDR' },
+  '印度尼西亚': { label: '印尼',       currency: 'IDR' },
+  'indonesia':  { label: '印尼',       currency: 'IDR' },
+  '越南':       { label: '越南',       currency: 'VND' },
+  'vietnam':    { label: '越南',       currency: 'VND' },
+  '马来西亚':   { label: '马来西亚',   currency: 'MYR' },
+  'malaysia':   { label: '马来西亚',   currency: 'MYR' },
+  '菲律宾':     { label: '菲律宾',     currency: 'PHP' },
+  'philippines':{ label: '菲律宾',     currency: 'PHP' },
+  '日本':       { label: '日本',       currency: 'JPY' },
+  'japan':      { label: '日本',       currency: 'JPY' },
+  '新加坡':     { label: '新加坡',     currency: 'SGD' },
+  'singapore':  { label: '新加坡',     currency: 'SGD' },
+  '英国':       { label: '英国',       currency: 'USD' },
+  'uk':         { label: '英国',       currency: 'USD' },
+  '德国':       { label: '德国',       currency: 'USD' },
+  'germany':    { label: '德国',       currency: 'USD' },
+  '法国':       { label: '法国',       currency: 'USD' },
+  'france':     { label: '法国',       currency: 'USD' },
+  '西班牙':     { label: '西班牙',     currency: 'USD' },
+  'spain':      { label: '西班牙',     currency: 'USD' },
+  '意大利':     { label: '意大利',     currency: 'USD' },
+  'italy':      { label: '意大利',     currency: 'USD' },
+  '墨西哥':     { label: '墨西哥',     currency: 'MXN' },
+  'mexico':     { label: '墨西哥',     currency: 'MXN' },
+  '巴西':       { label: '巴西',       currency: 'BRL' },
+  'brazil':     { label: '巴西',       currency: 'BRL' },
+};
+
+/** 解析 --country：接受中文名或英文名/ISO 代码，返回 {label, currency} */
+function resolveCountry(raw) {
+  if (!raw) return null;
+  const key = String(raw).trim().toLowerCase();
+  if (COUNTRIES[key]) return COUNTRIES[key];
+  // 兜底：中文名直接查
+  for (const [k, v] of Object.entries(COUNTRIES)) {
+    if (k === String(raw).trim()) return v;
+  }
+  throw new Error(
+    `未知国家「${raw}」。支持：美国(us)、泰国(th)、印尼、越南、马来西亚、菲律宾、日本、新加坡、英国、德国、法国、西班牙、意大利、墨西哥、巴西。`
+  );
+}
+
 /* ---------------- 参数 ---------------- */
 function parseArgs(argv) {
   const [cmd, ...rest] = argv;
   const opts = { cmd };
+  const positional = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a.startsWith('--')) {
       const k = a.slice(2);
       const v = rest[i + 1] && !rest[i + 1].startsWith('--') ? rest[++i] : true;
       opts[k] = v;
+    } else {
+      positional.push(a);
     }
   }
+  if (positional.length) opts._ = positional;
   return opts;
 }
 
@@ -126,6 +192,67 @@ async function assertLoggedIn(page) {
     await new Promise((r) => setTimeout(r, 400));
   }
   throw new Error('FastMoss 顶栏 8 秒内没渲染出来：检查网络或页面是否被拦（可先 --headed=false 观察）。');
+}
+
+/**
+ * 切换国家站点：点右上角国家按钮 → 弹层里点目标国家名。
+ * 国家选择持久化到 profile，但 URL 不带参数，所以每次抓取前都要显式切换（幂等：已是目标国则跳过）。
+ * 返回实际切换后的国家名（用于 meta 记录），失败抛错。
+ */
+async function switchCountry(page, countryKey) {
+  const target = resolveCountry(countryKey);
+  if (!target) return null;
+
+  // 1. 读当前右上角国家按钮文本
+  const readCurrent = () =>
+    safeEval(page, () => {
+      const btns = [...document.querySelectorAll('button')];
+      const b = btns.find((x) => ['美国', '泰国', '印尼', '越南', '马来西亚', '菲律宾', '日本', '新加坡', '英国', '德国', '法国', '西班牙', '意大利', '墨西哥', '巴西'].includes((x.innerText || '').trim()));
+      return b ? b.innerText.trim() : null;
+    }).catch(() => null);
+
+  let current = await readCurrent();
+  if (current === target.label) {
+    log(`国家已是「${target.label}」，跳过切换`);
+    return target.label;
+  }
+
+  // 2. 点开国家切换弹层（右上角带国家名的 button）
+  const opener = () =>
+    page.evaluate((label) => {
+      const btns = [...document.querySelectorAll('button')];
+      const b = btns.find((x) => ['美国', '泰国', '印尼', '越南', '马来西亚', '菲律宾', '日本', '新加坡', '英国', '德国', '法国', '西班牙', '意大利', '墨西哥', '巴西'].includes((x.innerText || '').trim()));
+      if (!b) return false;
+      b.click();
+      return true;
+    }, target.label).catch(() => false);
+
+  if (!(await opener())) throw new Error('找不到右上角国家切换按钮，可能未登录或页面结构变化');
+
+  // 3. 等弹层出现，点目标国家名（精确匹配，避免「印度」命中「印度尼西亚」等前缀）
+  const clicked = await page
+    .waitForSelector('button', { timeout: 8000 })
+    .then(() => safeEval(page, (label) => {
+      const btns = [...document.querySelectorAll('button')];
+      const hit = btns.find((x) => (x.innerText || '').trim() === label);
+      if (!hit) return false;
+      hit.click();
+      return true;
+    }, target.label))
+    .catch(() => false);
+
+  if (!clicked) throw new Error(`国家切换弹层里找不到「${target.label}」选项`);
+
+  // 4. 等切换生效：右上角按钮文本变为目标国
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(400);
+    current = await readCurrent();
+    if (current === target.label) {
+      log(`已切换到「${target.label}」站（币种 ${target.currency}）`);
+      return target.label;
+    }
+  }
+  throw new Error(`切换「${target.label}」未生效（当前仍显示「${current}」）`);
 }
 
 /* ---------------- 列表抓取 ---------------- */
@@ -217,6 +344,8 @@ async function cmdSearch(opts) {
 
   const [first] = context.pages();
   await assertLoggedIn(first);
+  const country = opts.country ? await switchCountry(first, opts.country) : null;
+  const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
 
   const urls = Array.from({ length: pages }, (_, i) =>
     buildSearchUrl({ follower: opts.follower, category: opts.category, page: i + 1, extra: opts.extra || '' })
@@ -245,6 +374,8 @@ async function cmdSearch(opts) {
 
   const meta = {
     collected_at: new Date().toISOString(),
+    country: country || null,
+    currency,
     filters: { follower: opts.follower, sale_category_l1: opts.category, extra: opts.extra || '' },
     pages_requested: pages,
     pages_ok: results.filter((r) => !r.error).length,
@@ -472,6 +603,8 @@ async function cmdDetail(opts) {
   const t0 = Date.now();
   const { context, launchMs } = await openBrowser({ headed: opts.headed !== 'false' });
   await assertLoggedIn(context.pages()[0]);
+  const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
+  const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
 
   const results = await poolWithPage(context, ids, concurrency, async (page, id) => {
     try {
@@ -505,8 +638,9 @@ async function cmdDetail(opts) {
 
   const meta = {
     collected_at: new Date().toISOString(),
+    country: country || null,
     period: opts.period || DEFAULT_PERIOD,
-    currency: 'USD',
+    currency,
     requested: ids.length,
     ok: results.filter((r) => !r.error).length,
     timings: {
@@ -524,10 +658,11 @@ async function cmdDetail(opts) {
 }
 
 /* ---------------- 一条龙 ---------------- */
-const BAG_RE = /(包|箱|手袋|钱包|托特|双肩|斜挎|单肩|手拿|化妆包|洗漱包|handbag|tote|backpack|purse|bag|satchel|clutch)/i;
+const BAG_RE = /(包|箱|手袋|钱包|托特|双肩|斜挎|单肩|手拿|化妆包|洗漱包|handbag|tote|backpack|purse|bag|satchel|clutch|กระเป๋า|ถุง|ย่าม)/i;
 const MV = (s) => {
   if (!s) return 0;
-  const t = String(s).replace(/[$,]/g, '');
+  // 剥离货币符号（$ ฿ Rp ₫ ₱ 等）与逗号；泰国站金额形如 ฿424.17万
+  const t = String(s).replace(/[$,฿₫₱¥€£\s]|Rp|S\$|MX\$|R\$/g, '');
   const n = parseFloat(t);
   if (isNaN(n)) return 0;
   return /万$/.test(t) ? n * 1e4 : n;
@@ -546,6 +681,8 @@ async function cmdPipeline(opts) {
   const t0 = Date.now();
   const { context, launchMs } = await openBrowser({ headed: opts.headed !== 'false' });
   await assertLoggedIn(context.pages()[0]);
+  const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
+  const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
   log(`浏览器就绪（${launchMs} ms），开始抓 ${pages} 页列表`);
 
   const urls = Array.from({ length: pages }, (_, i) =>
@@ -566,7 +703,8 @@ async function cmdPipeline(opts) {
   const picked = ranked.slice(0, top);
 
   fs.writeFileSync(path.join(outDir, 'candidates.json'), JSON.stringify({ meta: {
-    collected_at: new Date().toISOString(), filters: { follower: opts.follower, category: opts.category },
+    collected_at: new Date().toISOString(), country: country || null, currency,
+    filters: { follower: opts.follower, category: opts.category },
     pages, unique_ids: records.length, bag_relevant: bagRows.length, picked: picked.length,
     timings: { launchMs, crawlMs: Date.now() - t0 - launchMs },
   }, records, bagRelevant: bagRows.map((r) => r.id) }, null, 2), 'utf8');
@@ -599,7 +737,8 @@ async function cmdPipeline(opts) {
 
   const meta = {
     collected_at: new Date().toISOString(),
-    filters: { follower: opts.follower, category: opts.category, period: opts.period || DEFAULT_PERIOD, currency: 'USD' },
+    country: country || null,
+    filters: { follower: opts.follower, category: opts.category, period: opts.period || DEFAULT_PERIOD, currency },
     list: { pages, unique_ids: records.length, bag_relevant: bagRows.length },
     detail: { requested: picked.length, ok: details.filter((d) => !d.error).length },
     timings: { launchMs, listMs: tDetail - t0 - launchMs, detailMs, totalMs: Date.now() - t0 },
@@ -609,6 +748,19 @@ async function cmdPipeline(opts) {
   log(`产物目录 ${outDir}`);
   await context.close();
   return { meta, outDir };
+}
+
+/* ---------------- 独立国家切换 ---------------- */
+/** 单独切换国家并持久化到 profile（不抓数据），供其他人先切站再用别的子命令 */
+async function cmdCountry(opts) {
+  const key = opts.country || (Array.isArray(opts._) ? opts._[0] : opts._);
+  if (!key) throw new Error('缺少国家参数：node scripts/rpa/fastmoss-rpa.mjs country 泰国');
+  const { context, launchMs } = await openBrowser({ headed: opts.headed !== 'false' });
+  await assertLoggedIn(context.pages()[0]);
+  const label = await switchCountry(context.pages()[0], key);
+  log(`国家切换完成：${label}（已持久化到 profile，币种 ${resolveCountry(key).currency}）`);
+  await context.close();
+  return { label, launchMs };
 }
 
 /* ---------------- 入口 ---------------- */
@@ -621,6 +773,7 @@ const main = async () => {
   if (opts.cmd === 'search') return cmdSearch(opts);
   if (opts.cmd === 'detail') return cmdDetail(opts);
   if (opts.cmd === 'pipeline') return cmdPipeline(opts);
+  if (opts.cmd === 'country') return cmdCountry(opts);
   throw new Error('未知命令：' + opts.cmd);
 };
 

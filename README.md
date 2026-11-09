@@ -29,8 +29,13 @@
 # 完整抓取 + 分析（RPA 主路径）
 node scripts/rpa/setup.mjs            # 首次：装 playwright 到 .tools/
 node scripts/rpa/login-window.mjs     # 弹窗登录一次（登录态存 .browser-profile/）
+node scripts/rpa/fastmoss-rpa.mjs country 泰国                    # 切换国家站点（可选，持久化）
 node scripts/rpa/fastmoss-rpa.mjs pipeline --pages 60 --top 18 --follower 5000,50000 --category 7 --out-dir outputs/<批次>
 node scripts/rpa/analyze.mjs --dir outputs/<批次> --top 10   # 出 JSON + 多维度分析报告.md
+
+# 抓取时顺带切国家（美国/泰国/印尼/越南/马来/菲律宾/日本/新加坡/英/德/法/西/意/墨西哥/巴西）
+node scripts/rpa/fastmoss-rpa.mjs pipeline --country 泰国 --follower 2000,50000 --category 7 --pages 60 --top 10
+node scripts/rpa/fastmoss-rpa.mjs search --country 印尼 --follower 5000,50000 --category 7 --pages 30
 
 # 历史带货分析：网页采集 evidence.json 后
 python scripts/history_analysis.py outputs/<批次>/evidence.json --output outputs/<批次>
