@@ -12,6 +12,7 @@
  * GMV÷销量 只称“件均销售额”，不称订单客单价。
  */
 import fs from 'node:fs';
+import { parseAmount, stripCurrency, findBrandIndex, BAG_CATEGORY } from './data-rules.mjs';
 import path from 'node:path';
 
 const args = process.argv.slice(2);
@@ -30,23 +31,13 @@ const targetProducts = new Set(getArg('competitor-products', '').split(',').filt
 const CURRENCY_SYMBOL = { USD: '$', THB: '฿', IDR: 'Rp', VND: '₫', MYR: 'RM', PHP: '₱', JPY: '¥', SGD: 'S$', MXN: 'MX$', BRL: 'R$' };
 const symbolOf = (c) => CURRENCY_SYMBOL[c] || (c ? c + ' ' : '$');
 
-const BAG = /箱包|手袋|钱包|托特|双肩包|斜挎包|单肩包|手拿包|手拎包|化妆包|洗漱包|\b(?:handbags?|totes?|backpacks?|purses?|bags?|satchels?|clutches)\b|กระเป๋า|ถุง|ย่าม/i;
+const BAG = BAG_CATEGORY;
 const REVIEW = /(review|unbox|honest|worth it|tested|\btest\b|\bvs\b|dupe|comparison|测评|实测|开箱|haul|优缺点|pros and cons|which one|quality|for less|girl math|รีวิว|บอกต่อ|ใช้ดี|คุ้ม|ทดลอง|เทียบ|ถูกและดี|ของดี|รีวิวจริง)/i;
 
-const num = (s) => {
-  if (s === null || s === undefined) return null;
-  // 剥离货币符号（$ ฿ Rp ₫ ₱ ¥ € £ S$ MX$ R$）与千分位逗号/空格；泰国站金额形如 ฿424.17万
-  let t = String(s).replace(/[$,฿₫₱¥€£\s]|Rp|S\$|MX\$|R\$/g, '');
-  if (!t || /^-+$/.test(t)) return null;
-  let mult = 1;
-  if (/亿$/.test(t)) { mult = 1e8; t = t.slice(0,-1); }
-  else if (/万$/.test(t)) { mult = 1e4; t = t.replace(/万$/, ''); }
-  const v = parseFloat(t);
-  return isNaN(v) ? null : +(v * mult).toFixed(2);
-};
+const num = parseAmount;
 const priceMid = (s) => {
   if (!s) return null;
-  const m = String(s).replace(/[$,฿₫₱¥€£\s]|Rp|S\$|MX\$|R\$/g, '').match(/\d+(\.\d+)?/g);
+  const m = stripCurrency(s).match(/\d+(\.\d+)?/g);
   if (!m) return null;
   const a = m.map(Number);
   return +(((a[0] + (a[1] ?? a[0])) / 2).toFixed(2));
@@ -307,8 +298,8 @@ function scoreCreator(c, ctx) {
   const bagGmv = c.calc.bagGmv ?? 0;
   s.breakdown.bagGmv = ctx.bagMax > 0 ? +((bagGmv / ctx.bagMax) * 25).toFixed(1) : 0;
   // 4. 客单价（0-10，$30-$100 之间线性给分，越高端分越高，但 >$100 回落以控风险）
-  const unit = c.calc.bagUnitGmv ?? 0;
-  s.breakdown.unit = +Math.max(0, Math.min(10, (unit - 15) / 8.5)).toFixed(1);
+  const unit = CURRENCY === 'USD' ? c.calc.bagUnitGmv : null;
+  s.breakdown.unit = unit == null ? null : +Math.max(0, Math.min(10, (unit - 15) / 8.5)).toFixed(1);
   // 5. 测评属性（0-10）
   const review = c.calc.reviewShare ?? 0;
   s.breakdown.review = +Math.min(10, review / 5).toFixed(1);
@@ -346,6 +337,7 @@ function estimateROI(c, { grossMargin = 0.6, refundRate = 0.05 } = {}) {
   const bagGmv = c.calc.bagGmv ?? 0;
   // 高：净贡献率≥40% 且（箱包垂直 或 包GMV≥$5万）；中：净贡献率≥40%；低：其余
   let grade;
+  if (CURRENCY !== 'USD') return { netContribution: netRounded, grade: '待配置本币阈值', breakeven: null };
   if (netRounded >= 0.40 && (bagShare >= 90 || bagGmv >= 50000)) grade = '高';
   else if (netRounded >= 0.40) grade = '中';
   else grade = '低';

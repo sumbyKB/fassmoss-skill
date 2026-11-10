@@ -1,12 +1,47 @@
 # 快速网页执行（RPA 主路径）
 
-用户已登录 FastMoss 网页时，用 `scripts/rpa/fastmoss-rpa.mjs` 一次跑完「列表 → 详情 → 落盘」，不再逐页、逐达人拆分调用。**先抓数据，再离线分析**。
+先按任务选择采集入口，再复用已登录的 FastMoss 网页读取数据。批量任务用 `scripts/rpa/fastmoss-rpa.mjs` 一次完成采集与落盘；需要单独分析的任务再运行对应分析脚本。
 
-## 为什么用 RPA 而不是 cua_repl
+## 按任务选择入口
 
-旧路径依赖 `mcp__cua_repl`（本环境不存在）或 `pagesScript()`（每次 bash 调用结束 session 就被杀，无法跨调用复用登录态）。新路径用 playwright 库 + 独立 Chrome profile（`.browser-profile/`）持久化登录态，一条命令抓完所有页。
+| 用户要什么 | 执行路径 | 报告 |
+|---|---|---|
+| 达人名单、达人历史带货 | `pipeline` / `detail` → `analyze.mjs` | 多维度分析报告 |
+| 商品销售、品牌对比、价格带 | `product` → `analyze-product.mjs` | brand-comparison.md |
+| 商品 ROI、商品投产、GMV / 广告费 | `product-roi` → 商品详情 → 投流分析 | 命令自动生成 JSON 和同名 Markdown |
+| 店铺榜 | `shop` → `analyze-shop.mjs` | shop-analysis.md |
+| 店铺详情 | `shop-detail-report` | 命令自动生成店铺详情报告 |
 
-## 三步命令
+商品 ROI 的完整参数和数据口径见 [product-workflow.md](product-workflow.md#商品投流-roi)。下文的达人专用命令、列映射和耗时，只适用于达人任务。
+
+## 登录与后台运行
+
+批量采集使用 Playwright 和本机独立的 `.browser-profile/` 保存登录状态。首次运行 `setup.mjs` 后，运行 `login-window.mjs`，在弹出的窗口人工登录并关闭该窗口，再启动采集。同一 profile 同时只运行一个登录或采集进程。
+
+采集默认无界面；需脱离终端继续运行时用 `run-background.mjs <子命令及参数>`。只有用户明确要求前台演示或调试时才开启可见窗口。通过当前环境的浏览器工具抽查页面时，先确认连接的标签页已登录；扩展连接的日常 Chrome 与 RPA profile 的登录状态独立。
+
+## 商品 ROI：一条命令完成采集与报告
+
+从项目根目录运行，首次准备和登录完成后，日常只需最后一条命令：
+
+```text
+node scripts/rpa/setup.mjs
+node scripts/rpa/login-window.mjs
+```
+
+登录完成并关闭登录窗口后：
+
+```text
+node scripts/rpa/run-background.mjs product-roi --country 美国 --keyword earbuds --pages 1 --top 10 --period 28 --out outputs/product-roi/product-roi.json
+```
+
+替换国家、关键词、数量和周期即可复用。返回 PID 和日志路径后，通过日志末尾及 `outputs/product-roi/product-roi.json` / `product-roi.md` 核对完成情况；启动成功只代表进程已创建。每个批次使用独立输出目录，避免覆盖已有报告。
+
+已有商品清单时，将 `--keyword earbuds --pages 1 --top 10` 换成 `--ids-file outputs/批次/products.json`；单个商品用 `--ids 商品ID`。三种输入选一种。逐个商品读取同一周期的投流销售额和广告消耗，ROI=前者÷后者，平台 ROAS 单独保留。缺指标、周期不明或广告消耗为0时显示未知，验证或权限提示会停止后续访问。
+
+支持近7/28/90天，近28天不能当近30天。这里的金额来自商品「投流分析」，不混入商品总览，也不用单条广告案例替代。前台单商品和本地无界面页面测试已验证；真实网站的完整后台批量采集尚未实测。
+
+## 达人任务：采集后离线分析
 
 ```bash
 # 0. 首次：装 playwright 到技能目录 .tools（不入库）
