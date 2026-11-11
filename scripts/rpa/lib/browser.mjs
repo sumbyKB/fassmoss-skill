@@ -22,8 +22,11 @@ function loadPlaywright() {
   throw new Error('未找到 playwright。请先执行：node scripts/rpa/setup.mjs');
 }
 
+/** 记录每个 context 是否拦截图片（WeakMap：运行时可动态切换，用于「默认拦图加速、触发验证码时放行」） */
+const blockImages = new WeakMap();
+
 /** 打开持久化浏览器上下文（复用登录态）。返回 { context, launchMs }，context 登记到 activeContexts。 */
-export async function openBrowser({ headed = false, channel = 'chrome' } = {}) {
+export async function openBrowser({ headed = false, channel = 'chrome', allowImages = false } = {}) {
   const { chromium } = loadPlaywright();
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
   const t0 = Date.now();
@@ -46,15 +49,22 @@ export async function openBrowser({ headed = false, channel = 'chrome' } = {}) {
   activeContexts.add(context);
   context.once('close', () => activeContexts.delete(context));
   const launchMs = Date.now() - t0;
-  // 只抓 DOM：图片/字体/视频全拦掉，页面加载明显更快（列表与详情都不依赖这些资源）
+  // 只抓 DOM：图片/字体/视频默认拦掉，页面加载明显更快（列表与详情都不依赖这些资源）。
+  // allowImages=true 时放行图片；也可运行中用 enableImages() 动态放行（如触发验证码需展示图片时）。
+  blockImages.set(context, !allowImages);
   await context.route('**/*', (route) => {
     const t = route.request().resourceType();
-    if (t === 'image' || t === 'media' || t === 'font') return route.abort();
+    if (blockImages.get(context) && (t === 'image' || t === 'media' || t === 'font')) return route.abort();
     return route.fallback();
   });
   context.setDefaultTimeout(20000);
   context.setDefaultNavigationTimeout(45000);
   return { context, launchMs };
+}
+
+/** 运行时放行图片加载（触发腾讯验证码等需要展示图片时调用） */
+export function enableImages(context) {
+  blockImages.set(context, false);
 }
 
 /** SPA 会在 goto 后再跳一次（加 page 参数），evaluate 要能容忍 context 被销毁 */

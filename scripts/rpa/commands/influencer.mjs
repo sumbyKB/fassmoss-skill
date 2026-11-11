@@ -348,10 +348,14 @@ export async function cmdDetail(opts) {
 }
 
 /* ---------------- 达人一条龙 ---------------- */
-const BAG_RE = BAG_CATEGORY;
 const MV = (value) => parseAmount(value) ?? 0;
 
 export async function cmdPipeline(opts) {
+  // 品类筛选正则：默认箱包（BAG_CATEGORY 中英泰三语）；也可用 --category-keyword 传自定义关键词（逗号分隔，支持多语）
+  const categoryKeyword = opts['category-keyword'] || null;
+  const categoryRe = categoryKeyword
+    ? new RegExp(String(categoryKeyword).split(/[,，|]/).map((s) => s.trim()).filter(Boolean).join('|'), 'i')
+    : BAG_CATEGORY;
   const outDir = opts['out-dir'] || path.join(SKILL_ROOT, 'outputs', `rpa-${new Date().toISOString().slice(0, 10)}`);
   fs.mkdirSync(outDir, { recursive: true });
   const pages = Number(opts.pages || 60);
@@ -379,7 +383,7 @@ export async function cmdPipeline(opts) {
   const byId = new Map();
   for (const r of listPages) for (const row of r.rows || []) if (row.id && !byId.has(row.id)) byId.set(row.id, row);
   const records = [...byId.values()];
-  const bagRows = records.filter((r) => BAG_RE.test(r.cells[1] || ''));
+  const bagRows = records.filter((r) => categoryRe.test(r.cells[1] || ''));
   const ranked = bagRows
     .map((r) => ({ ...r, gmvN: MV(r.cells[3]) }))
     .sort((a, b) => b.gmvN - a.gmvN);
@@ -391,7 +395,7 @@ export async function cmdPipeline(opts) {
     pages, unique_ids: records.length, bag_relevant: bagRows.length, picked: picked.length,
     timings: { launchMs, crawlMs: Date.now() - t0 - launchMs },
   }, records, bagRelevant: bagRows.map((r) => r.id) }, null, 2), 'utf8');
-  log(`列表完成：${records.length} 位 → 含包 ${bagRows.length} 位 → 取前 ${picked.length} 位做详情`);
+  log(`列表完成：${records.length} 位 → 含目标品类 ${bagRows.length} 位 → 取前 ${picked.length} 位做详情`);
 
   const tDetail = Date.now();
   const details = await poolWithPage(context, picked.map((p) => p.id), dConc, async (page, id) => {

@@ -20,6 +20,11 @@ description: 用大白话操作已登录的 FastMoss，抓取 TikTok 达人历�
 | 商品投流 ROI | `product-roi` | 命令内计算并出报告 | product-roi.json / product-roi.md |
 | 品类 ROI 一条龙（榜→过滤→ROI→优势报告） | `category-roi` | 命令内计算并出报告 | 前NROI.json / 前NROI.md |
 | 店铺榜（品牌/分类/评分） | `shop` | `analyze-shop.mjs` | shop-analysis.md |
+| 店铺详情（搜索→详情→报告） | `shop-detail` / `shop-detail-report` | `analyze-shop-detail.mjs` | 店铺详情分析.md |
+| 店铺趋势涨跌（近N天 vs 上个N天 + 商品归因） | `shop-trend` | 命令内计算并出报告 | shop-trend.json / shop-trend.md |
+| 店铺对比（某类目GMV前N店铺，对比GMV/价格/佣金/达人） | `shop-compare` | 命令内聚合并出报告 | shop-compare.json / shop-compare.md |
+| 店铺达人挖取（竞品店铺带货达人清单） | `shop-authors` | 命令内聚合出报告 | shop-authors.json / shop-authors.md |
+| 店铺洞察（品类结构/达人结构/成交结构/价格分布/爆款视频/爆款直播） | `shop-insight` | 命令内聚合出报告 | shop-insight.json / shop-insight.md |
 | 分类树（分类名→ID） | `categories` | — | categories.json |
 
 ## 国家站点切换（重要）
@@ -36,6 +41,9 @@ node scripts/rpa/fastmoss-rpa.mjs pipeline --country 泰国 --follower 2000,5000
 node scripts/rpa/fastmoss-rpa.mjs search --country 印尼 --follower 5000,50000 --category 7 --pages 30
 node scripts/rpa/fastmoss-rpa.mjs detail --country 越南 --ids-file ids.json
 ```
+
+> **pipeline 品类通用化**：pipeline 默认筛「箱包」达人；找其他品类达人时用 `--category-keyword "运动鞋,sneakers,รองเท้า"`（逗号分隔的多语关键词），无需改代码。
+
 
 支持国家与币种（中文名或英文/ISO 代码均可）：美国(us/USD)、泰国(th/THB)、印尼(IDR)、越南(VND)、马来西亚(MYR)、菲律宾(PHP)、日本(JPY)、新加坡(SGD)、英国(USD)、德国(USD)、法国(USD)、西班牙(USD)、意大利(USD)、墨西哥(MXN)、巴西(BRL)。币种会自动写入产物 meta（`candidates.json` / `details.json` 的 `meta.currency`、`meta.country`），`analyze.mjs` 会读取该币种自动切换报告金额符号（`$`/`฿`/`Rp`/`₫` 等），也可显式 `--currency THB` 覆盖。
 
@@ -116,6 +124,60 @@ node scripts/rpa/analyze-shop-detail.mjs --file outputs/<批次>/<店铺名>_det
 > **分析报告**：`analyze-shop-detail.mjs` 从详情 JSON 生成结构化报告，五部分：①店铺总览（8项+评分+基础信息）②商品排行（按GMV降序）③价格带分布 ④品类/成交渠道/销售方式 ⑤核心洞察（评分、销售额冠军、价格跨度、达人/视频占比，自动生成）。`shop-detail-report` 命令把抓取+分析串成一条龙。
 
 > **注意**：采集默认无界面。出现访问验证时停止并提示用户人工处理，不自动切前台或抢焦点。只有用户明确要求演示或调试时才传 `--headed true`。
+
+## 店铺趋势涨跌（近N天 vs 上个N天 + 商品归因）
+
+用户要「某店铺最近 N 天总销量/GMV、跟上个 N 天比涨还是跌、哪个商品拖后腿/领涨」时，用 `shop-trend`。数据源是店铺详情页的 `recentData`（店铺级 90 天逐日）与商品详情页 `overview`（商品级 90 天逐日），涨跌按逐日增量精确求和，非估算。店铺名/国家/对比天数均为变量：
+
+```bash
+# 泰国 Steapex 店铺，近30天 vs 上个30天涨跌 + 商品归因
+node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop Steapex --country 泰国 --days 30 --headed true --out outputs/<批次>/shop-trend.json
+
+# 已知店铺 ID 直接抓（跳过搜索）
+node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop-id 7495956634965609461 --country 泰国 --days 30 --out xxx.json
+```
+
+产出 JSON + 同名 `.md`（店铺整体涨跌 + 拖后腿/领涨商品归因）。字段：近N天/上个N天的销量与GMV、环比百分比、每个商品的涨跌。
+
+> **实现要点**：`recentData?date_type=90`、`overview?d_type=90` 均有 MSG_SAFE_0001 签名，不能直接 fetch；须「点击页面「近90天」周期按钮 + 监听响应」拿 90 天逐日数据。默认不加载图片（加速），仅当点击周期触发腾讯验证码时才自动放行图片并等待人工完成。
+
+## 店铺对比（某类目 GMV 前 N 店铺逐个对比）
+
+用户要「某类目（如运动鞋）GMV 排名前 N 的店铺，逐个对比 GMV / 爆款价格区间 / 达人数量 / 平均佣金率，找出可借鉴 vs 学不了」时，用 `shop-compare`。它抓类目商品榜（精确到二级分类 l2_cid）→ 按店铺聚合 GMV → 取前 N → 逐个搜店铺名抓达人数量 → 出对比报告。国家/类目/前N/天数/基准店铺均为变量：
+
+```bash
+# 泰国运动鞋类目，近30天 GMV 前10店铺，跟 Steapex 对比
+node scripts/rpa/fastmoss-rpa.mjs shop-compare --country 泰国 --category 运动鞋 --top 10 --days 30 --benchmark Steapex --headed true --out xxx.json
+```
+
+产出 JSON + 同名 `.md`（前N店铺对比表：GMV / 价格区间 / 平均佣金 / 达人数量 / 分类排名）。
+
+> **口径**：GMV 按商品榜（二级类目）按店铺聚合，非店铺整体 GMV；达人数量为店铺详情页累计口径；佣金为上榜商品平均；价格区间已过滤鞋垫等配件。
+
+## 店铺达人挖取（从竞品店铺挖带货达人）
+
+用户要「从某店铺/竞品店铺挖带货达人清单，看谁在给它带货、贡献多少」时，用 `shop-authors`。数据源是店铺详情页 `/api/shop/v3/author` 接口（返回达人昵称/粉丝/贡献GMV/销量/GPM），按贡献 GMV 排序。店铺名/国家/前N均为变量：
+
+```bash
+# 挖 Steapex 的带货达人前20（BD 挖人直接对标）
+node scripts/rpa/fastmoss-rpa.mjs shop-authors --shop Steapex --country 泰国 --top 20 --headed true --out xxx.json
+```
+
+产出 JSON + 同名 `.md`（达人清单：粉丝 / 贡献GMV / 销量 / 带货商品数 / 视频GPM / 直播GPM + 达人主页链接）。
+
+> **口径**：达人 GMV/销量为该店铺内的贡献口径（非达人全平台）；GPM 为视频/直播千次播放销售额区间。作者接口每页 5 个达人，命令会自动翻页取前 N。
+
+## 店铺洞察（一次抓全店铺 6 大维度）
+
+用户要「全面看透一家店铺：主营什么品类、用什么达人、怎么成交、价格怎么分布、哪些视频/直播爆款」时，用 `shop-insight`。它一次打开店铺详情页，抓 6 个分析接口，输出综合洞察报告。店铺名/国家均为变量：
+
+```bash
+node scripts/rpa/fastmoss-rpa.mjs shop-insight --shop Steapex --country 泰国 --headed true --out xxx.json
+```
+
+产出 JSON + 同名 `.md`，六部分：①品类结构（二级/三级分类销量占比）②达人结构（粉丝区间/达人类型分布）③成交结构（渠道/内容形式占比）④价格分布（商品价格分档）⑤爆款视频（含 AD 标记）⑥爆款直播（含店铺自播标记）。
+
+> **实现要点**：6 个接口（goodsStats/authorAnalysis/saleAnalysis/priceRange/videoAnalysis/liveAnalysis）需逐个点对应 tab + 滚动触发懒加载；视频/直播接口 URL 用「?」精确匹配以排除 Summary 汇总接口；价格带接口只有档位定义无占比，故用 goods 商品价格自行分档。
 
 ## 直播搜索（按关键词搜直播 / 抓直播大盘）
 

@@ -12,7 +12,7 @@ import { productRoiOptions, searchProductRoiCandidates, scrapeProductRoi, render
 const PRODUCT_BASE = `${BASE}/e-commerce/saleslist`;
 
 /** date_type 映射：days 语义 → 榜单类型（1日榜/2周榜/3月榜） */
-function dateTypeOf(days) {
+export function dateTypeOf(days) {
   if (days == null) return 1;
   const d = Number(days);
   if (d <= 1) return 1;          // 近1天 → 日榜
@@ -37,6 +37,8 @@ function buildProductUrl({ dateType, dateValue, category, categoryId, categoryId
   qs.set('page', String(page));
   return `${PRODUCT_BASE}?${qs.toString()}`;
 }
+
+export { buildProductUrl };
 
 /** 等待商品榜表格有真实数据行（≥2 个真实数据行，排除「暂无数据」占位与单行加载态） */
 async function waitProductRows(page, { timeout = 15000 } = {}) {
@@ -87,7 +89,7 @@ const PRODUCT_EXTRACT_FN = function () {
 };
 
 /** 抓单页商品榜 */
-async function grabProductPage(page, url) {
+export async function grabProductPage(page, url) {
   const t0 = Date.now();
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   const navMs = Date.now() - t0;

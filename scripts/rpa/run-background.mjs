@@ -3,11 +3,11 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { COMMAND_NAMES } from './fastmoss-rpa.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const args = process.argv.slice(2);
-const commands = new Set(['search', 'detail', 'pipeline', 'product', 'product-roi', 'category-roi', 'shop', 'categories', 'country', 'shop-detail', 'shop-detail-report', 'live', 'live-detail', 'video', 'ad']);
-if (!commands.has(args[0])) throw new Error('请提供采集命令，如 search、pipeline、product 或 shop');
+if (!COMMAND_NAMES.includes(args[0])) throw new Error('请提供采集命令，如 search、pipeline、product 或 shop');
 if (args.some(arg => arg === '--headed' || arg.startsWith('--headed='))) {
   throw new Error('后台启动器固定无界面运行。需要可见窗口时请直接运行 fastmoss-rpa.mjs --headed true');
 }

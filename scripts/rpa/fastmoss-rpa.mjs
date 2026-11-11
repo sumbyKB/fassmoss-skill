@@ -47,6 +47,18 @@
  *   node scripts/rpa/fastmoss-rpa.mjs shop-detail-report --shop Steapex.Malaysia --country 马来西亚 --out xxx.json
  *     → 产出 JSON 数据 + 同目录 <shop名>_店铺详情分析.md
  *
+ * 店铺趋势涨跌（近N天 vs 上个N天 + 商品归因，店铺名/国家/天数均为变量）：
+ *   node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop Steapex --country 泰国 --days 30 --out xxx.json
+ *     → 产出 JSON + 同名 .md（店铺整体涨跌 + 拖后腿/领涨商品归因）
+ *
+ * 店铺对比（某类目 GMV 前 N 店铺逐个对比 GMV/价格/佣金/达人，条件全变量）：
+ *   node scripts/rpa/fastmoss-rpa.mjs shop-compare --country 泰国 --category 运动鞋 --top 10 --days 30 --benchmark Steapex --out xxx.json
+ *     → 产出 JSON + 同名 .md（前N店铺对比表 + 达人数量）
+ *
+ * 店铺达人挖取（从竞品店铺挖带货达人清单，按贡献GMV排序）：
+ *   node scripts/rpa/fastmoss-rpa.mjs shop-authors --shop Steapex --country 泰国 --top 20 --out xxx.json
+ *     → 产出 JSON + 同名 .md（达人清单：粉丝/贡献GMV/销量/GPM + 链接）
+ *
  * 直播搜索（按关键词/达人昵称/标题搜直播，抓直播列表）：
  *   node scripts/rpa/fastmoss-rpa.mjs live --keyword steapex --country 马来西亚 --pages 3 --out outputs/<批次>/lives.json
  *   node scripts/rpa/fastmoss-rpa.mjs live --pages 10 --out lives.json          # 不搜关键词，抓直播大盘
@@ -71,12 +83,16 @@
  *   支持：美国(us) 泰国(th) 印尼 越南 马来西亚 菲律宾 日本 新加坡 英国 德国 法国 西班牙 意大利 墨西哥 巴西
  */
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from './lib/cli.mjs';
 import { activeContexts } from './lib/browser.mjs';
 import { cmdSearch, cmdDetail, cmdPipeline } from './commands/influencer.mjs';
 import { cmdProduct, cmdProductRoi, cmdCategoryRoi } from './commands/product.mjs';
 import { cmdShop, cmdShopDetail, cmdShopDetailReport } from './commands/shop.mjs';
+import { cmdShopTrend } from './commands/shop-trend.mjs';
+import { cmdShopCompare } from './commands/shop-compare.mjs';
+import { cmdShopAuthors } from './commands/shop-authors.mjs';
+import { cmdShopInsight } from './commands/shop-insight.mjs';
 import { cmdLive, cmdLiveDetail } from './commands/live.mjs';
 import { cmdVideo } from './commands/video.mjs';
 import { cmdAd } from './commands/ad.mjs';
@@ -84,7 +100,7 @@ import { cmdCategories } from './commands/categories.mjs';
 import { cmdCountry } from './commands/country.mjs';
 
 /** 命令名 → 处理函数。新增命令时在此登记即可，main 保持单一职责。 */
-const HANDLERS = {
+export const HANDLERS = {
   search: cmdSearch,
   detail: cmdDetail,
   pipeline: cmdPipeline,
@@ -95,12 +111,19 @@ const HANDLERS = {
   shop: cmdShop,
   'shop-detail': cmdShopDetail,
   'shop-detail-report': cmdShopDetailReport,
+  'shop-trend': cmdShopTrend,
+  'shop-compare': cmdShopCompare,
+  'shop-authors': cmdShopAuthors,
+  'shop-insight': cmdShopInsight,
   live: cmdLive,
   'live-detail': cmdLiveDetail,
   video: cmdVideo,
   ad: cmdAd,
   categories: cmdCategories,
 };
+
+/** 全部命令名（HANDLERS 的 key 是唯一权威来源，run-background / 测试都从这里取，避免重复维护清单） */
+export const COMMAND_NAMES = Object.keys(HANDLERS);
 
 const main = async () => {
   const opts = parseArgs(process.argv.slice(2));
@@ -118,7 +141,10 @@ const main = async () => {
   }
 };
 
-main().catch((e) => {
-  console.error('RPA 失败：', e.message);
-  process.exit(1);
-});
+// 只在直接运行时执行 main（被 import 时不执行，供 run-background / 测试复用 HANDLERS 而不会误跑命令）
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    console.error('RPA 失败：', e.message);
+    process.exit(1);
+  });
+}

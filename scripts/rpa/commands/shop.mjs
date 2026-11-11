@@ -313,7 +313,7 @@ export async function cmdShopDetail(opts) {
   const shopName = opts.shop || opts['shop-name'] || (Array.isArray(opts._) ? opts._[0] : null);
   const shopId = opts['shop-id'] || opts.id || null;
   if (!shopName && !shopId) {
-    throw new Error('缺少店铺名或 ID：node scripts/rpa/fastmoss-rpa.mjs shop-detail --shop Steapex.Malaysia');
+    throw new Error('缺少店铺名或 ID：node scripts/rpa/fastmoss-rpa.mjs shop-detail --shop <店铺名>');
   }
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `shop-detail-${(shopName || shopId).replace(/[^\w.-]/g, '_')}-${Date.now()}.json`);
   const t0 = Date.now();

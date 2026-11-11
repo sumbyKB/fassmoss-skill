@@ -27,9 +27,12 @@ scripts/rpa/
 |---|---|---|
 | `config.mjs` | 路径常量、国家/币种映射、region 映射 | `BASE` `SKILL_ROOT` `PROFILE_DIR` `COUNTRIES` `COUNTRY_LABELS` `REGION_BY_LABEL` `resolveCountry` |
 | `cli.mjs` | 命令行参数解析、时间戳日志 | `parseArgs` `log` |
-| `browser.mjs` | 浏览器生命周期、登录检测、国家切换 | `openBrowser` `safeEval` `assertLoggedIn` `switchCountry` `activeContexts` |
+| `browser.mjs` | 浏览器生命周期、登录检测、国家切换 | `openBrowser` `safeEval` `assertLoggedIn` `switchCountry` `activeContexts` `enableImages` |
 | `pool.mjs` | 并发执行池（通用 + 页面复用） | `pool` `poolWithPage` |
 | `categories.mjs` | 分类名 → 分类 ID 匹配 | `CATEGORY_ALIASES` `resolveCategoryId` |
+| `report.mjs` | 报告工具函数（markdown 转义/金额/百分比） | `cell` `short` `money` `pct` |
+| `tracker.mjs` | 接口响应跟踪（监听签名接口数据） | `makeTracker` `makeMultiTracker` `waitTracked` |
+| `shop.mjs` | 店铺共享函数（搜索拿ID/抓总览8项） | `resolveShopId` `grabShopOverview` |
 
 ### 业务 `commands/`
 
@@ -38,6 +41,10 @@ scripts/rpa/
 | `product.mjs` | `product` `product-roi` `category-roi` | 商品榜 / 商品投流ROI / 品类ROI一条龙 |
 | `influencer.mjs` | `search` `detail` `pipeline` | 达人搜索 / 达人详情 / 达人一条龙 |
 | `shop.mjs` | `shop` `shop-detail` `shop-detail-report` | 店铺榜 / 店铺详情 / 店铺详情报告 |
+| `shop-trend.mjs` | `shop-trend` | 店铺近N天 vs 上个N天涨跌 + 商品归因 |
+| `shop-compare.mjs` | `shop-compare` | 某类目GMV前N店铺对比（GMV/价格/佣金/达人） |
+| `shop-authors.mjs` | `shop-authors` | 竞品店铺带货达人挖取（粉丝/GMV/GPM） |
+| `shop-insight.mjs` | `shop-insight` | 店铺六维洞察（品类/达人/成交/价格/视频/直播） |
 | `live.mjs` | `live` `live-detail` | 直播搜索 / 直播详情 |
 | `video.mjs` | `video` | 视频搜索（含 TikTok 链接） |
 | `ad.mjs` | `ad` | 广告创意中心采样 |
@@ -51,14 +58,17 @@ scripts/rpa/
 - `analyze*.mjs`：离线分析脚本（读已抓取的 JSON 出报告），不启动浏览器。
 - `login-window.mjs` / `run-background.mjs` / `setup.mjs`：登录窗口、后台启动器、playwright 安装器。
 
-## 三、新增一个命令的步骤
+## 三、新增一个命令的步骤（只改一处）
+
+命令清单以 `fastmoss-rpa.mjs` 的 `HANDLERS` 为**唯一权威来源**，`run-background.mjs` 和测试都从它 import `COMMAND_NAMES`，不用重复维护清单。
 
 1. 在对应业务的 `commands/*.mjs` 里写 `export async function cmdXxx(opts) {...}`。
    - 浏览器统一用 `openBrowser({ headed: opts.headed === true || opts.headed === 'true' })`（必须显式 headed 开关）。
-   - 登录检测、国家切换、并发池分别从 `lib/browser.mjs`、`lib/pool.mjs` 复用，不要重写。
-2. 在 `fastmoss-rpa.mjs` 的 `HANDLERS` 里登记 `xxx: cmdXxx`。
+   - 登录检测、国家切换、并发池、报告工具分别从 `lib/browser.mjs`、`lib/pool.mjs`、`lib/report.mjs` 复用，不要重写。
+2. 在 `fastmoss-rpa.mjs` 的 `HANDLERS` 里登记 `xxx: cmdXxx`（`COMMAND_NAMES` 自动同步）。
 3. 更新 `fastmoss-rpa.mjs` 顶部 `/** */` 注释块里的命令说明（否则 help 里看不到）。
-4. 若该命令需要后台运行，把命令名加进 `run-background.mjs` 的 `commands` 集合。
+
+搜索条件一律写成 `opts.xxx`（变量），不要硬编码店铺名/类目/国家/日期/数量。
 
 ## 四、关键约定（务必遵守）
 
@@ -82,3 +92,50 @@ node --test scripts/rpa/*.test.mjs
 | `cli.test.mjs` | 参数校验在浏览器启动前失败 |
 
 改代码后先 `node --check` 再跑测试，保证不回归。
+
+## 六、搜索条件变量规范（通用化原则）
+
+**所有搜索条件都是变量，禁止写死。** 命令里凡涉及"搜什么、在哪搜、搜多少"，一律走 `--参数`，不得硬编码店铺名/类目/国家/日期/数量。
+
+### 通用参数（所有命令一致）
+
+| 参数 | 含义 |
+|---|---|
+| `--country` | 国家站点（泰国/美国/印尼…，中英文名均可） |
+| `--headed` | 是否可见窗口（`true`/`false`，默认无界面） |
+| `--out` | 输出 JSON 路径（缺省自动生成到 outputs/） |
+
+### 各搜索条件对应参数（按语义）
+
+| 搜索条件 | 参数 | 示例 |
+|---|---|---|
+| 店铺 | `--shop` / `--shop-id` | `--shop Steapex` |
+| 类目 | `--category`（中文名自动匹配 ID）/ `--category-id` / `--category-id2` | `--category 运动鞋` |
+| 国家 | `--country` | `--country 泰国` |
+| 前 N 名 | `--top` | `--top 10` |
+| 周期天数 | `--days` / `--period` | `--days 30` |
+| 页数 | `--pages` | `--pages 15` |
+| 关键词 | `--keyword`（别名 `--words`/`--kw`） | `--keyword earbuds` |
+| 粉丝区间 | `--follower` | `--follower 20000,100000` |
+| 日期范围 | `--start` / `--end` | `--start 2026-10-09 --end 2026-11-09` |
+| 排序 | `--sort` | `--sort gmv` |
+| 品类关键词（pipeline 达人筛选） | `--category-keyword`（默认箱包，可传任意品类多语关键词） | `--category-keyword "运动鞋,sneakers,รองเท้า"` |
+| 基准店铺（对比） | `--benchmark` | `--benchmark Steapex` |
+| 并发数 | `--concurrency` / `--detail-concurrency` | `--concurrency 6` |
+
+### 换搜索条件 = 改参数，不改代码
+
+同一个命令，换国家/类目/前N 只改变量即可。例：
+
+```bash
+# 查运动鞋前10店铺
+... shop-compare --category 运动鞋 --country 泰国 --top 10
+# 换箱包前20，只改参数
+... shop-compare --category 箱包 --country 泰国 --top 20
+# pipeline 挖箱包达人 → 换运动鞋达人，只加品类关键词
+... pipeline --category-keyword "运动鞋,sneakers,รองเท้า"
+```
+
+### 新增命令时
+
+搜索条件一律写成 `opts.xxx`（或 `opts['xxx']`），在文件顶部注释里写明参数含义与示例；错误提示用占位符 `<店铺名>` 而非具体值。

@@ -2,16 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { analyzeShopDetail } from './analyze-shop-detail.mjs';
-
-const COMMANDS = ['search', 'detail', 'pipeline', 'country', 'product', 'product-roi', 'category-roi', 'shop', 'shop-detail', 'shop-detail-report', 'live', 'live-detail', 'video', 'ad', 'categories'];
+import { COMMAND_NAMES } from './fastmoss-rpa.mjs';
 
 test('entry registers all commands and closes contexts in finally', () => {
+  // 命令数合理（HANDLERS 是命令清单的唯一权威来源，run-background / 测试都从这里复用，不重复维护）
+  assert.ok(COMMAND_NAMES.length >= 15, `命令数不足：${COMMAND_NAMES.length}`);
   const source = readFileSync(new URL('./fastmoss-rpa.mjs', import.meta.url), 'utf8');
-  // HANDLERS 映射表覆盖全部 15 个命令
-  for (const cmd of COMMANDS) {
-    const key = cmd.includes('-') ? `'${cmd}'` : cmd;
-    assert.match(source, new RegExp(`^\\s{2}${key.replace(/[-]/g, '\\-')}: cmd`, 'm'), `缺命令 ${cmd}`);
-  }
   // main 在 finally 里统一关闭所有存活上下文，保证资源不泄漏
   assert.match(source, /finally\s*\{/);
   assert.match(source, /activeContexts[^]*?context\.close/);
@@ -29,7 +25,7 @@ test('every command module requires an explicit headed opt-in', () => {
   }
   assert.ok(calls >= 10, `openBrowser 调用数不足：${calls}`);
   const launcher = readFileSync(new URL('./run-background.mjs', import.meta.url), 'utf8');
-  assert.match(launcher, /'product-roi'/);
+  assert.match(launcher, /COMMAND_NAMES/);
   assert.match(launcher, /'--headed', 'false'/);
 });
 
