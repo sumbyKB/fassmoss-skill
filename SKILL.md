@@ -17,6 +17,7 @@ description: 用大白话操作已登录的 FastMoss，抓取 TikTok 达人历�
 |---|---|---|---|
 | 达人（搜索/详情/历史带货） | `search` / `pipeline` / `detail` | `analyze.mjs` | 推荐名单 + 多维度报告 |
 | 商品榜（品类/品牌/价格带） | `product` | `analyze-product.mjs` | brand-comparison.md |
+| 新品榜（近期上架商品，三日销量口径） | `new-products` | 列表自带；近7天/趋势需进详情补抓 | new-products.json |
 | 商品投流 ROI | `product-roi` | 命令内计算并出报告 | product-roi.json / product-roi.md |
 | 品类 ROI 一条龙（榜→过滤→ROI→优势报告） | `category-roi` | 命令内计算并出报告 | 前NROI.json / 前NROI.md |
 | 店铺榜（品牌/分类/评分） | `shop` | `analyze-shop.mjs` | shop-analysis.md |
@@ -79,7 +80,37 @@ node scripts/rpa/analyze-product.mjs --dir outputs/<批次> --category 跑步鞋
 
 > **分类自动匹配**：`--category 跑步鞋` 会自动读 `categories.json`（完整分类树，含一二级 ID），先走同义词归一（跑步鞋→运动鞋、护肤品→美容护肤、衣服→女装、包包→箱包…），再精确/模糊匹配到一级 `l1_cid` 或二级 `l2_cid`。匹配不到时回退「抓全量 + 关键词过滤」。也支持显式 `--category-id <一级ID>` `--category-id2 <二级ID>` 跳过自动匹配。
 >
-> 「跑步鞋」→ 运动鞋(二级 l2_cid=834696)，其下三级分类才叫「跑步鞋」。分类树接口 `/api/shop/V3/categoryInfo` 返回 30 个一级 + 249 个二级，稳定可靠。
+> 存在完整分类树时，「跑步鞋」优先精确匹配三级；旧分类树缺三级时才通过别名匹配二级运动鞋。分类树接口 `/api/shop/V3/categoryInfo` 返回 30 个一级 + 249 个二级，稳定可靠。
+>
+> **三级分类筛选**：`categories` 命令从 `/api/live/filterInfo` 的 `data.product_category` 一次性抓全 **30 个一级 + 247 个二级 + 2370 个三级**（全带 ID），存 `categories.json` 的 `l3_categories`，和一二级一样「提前抓取、自动匹配」。商品榜 `product`、新品榜 `new-products`、视频商品榜 `hot-video` 都支持 `--category-id3 <三级ID>`（URL 参数 `l3_cid`），`--category <三级名>` 自动匹配（如「手机壳」→ 保护壳、屏幕保护膜、皮肤=601925；「移动电源」→ 910728）：
+>
+> ```bash
+> node scripts/rpa/fastmoss-rpa.mjs product --country 美国 --category 手机壳 --days 7 --pages 20 --out outputs/x/products.json
+> node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category 手机壳 --pages 20 --out outputs/x/newproducts.json
+> node scripts/rpa/fastmoss-rpa.mjs hot-video --country 美国 --category 手机壳 --pages 20 --out outputs/x/hotvideo.json
+> ```
+>
+> 也可显式传 ID 跳过自动匹配：`--category-id 16 --category-id2 909064 --category-id3 601925`。
+
+## 新品榜（近期上架商品，三日销量口径）
+
+用户要「看某类目最近上架的商品、追踪新品爬坡」时，用 `new-products` 子命令抓 FastMoss「新品榜」`/zh/e-commerce/newProducts`（导航「商品 → 新品榜」，副标题「追踪近期上架的商品」）：
+
+```bash
+# 美区手机配件（二级分类）新品榜，抓 20 页
+node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category-id 16 --category-id2 909064 --pages 20 --out outputs/<批次>/newproducts.json
+
+# 分类自动匹配（--category 大白话，同 product）
+node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category 手机配件 --pages 20 --out outputs/<批次>/newproducts.json
+```
+
+抓取字段：商品ID、名称、售价区间、上架时间、店铺、分类、佣金、三日销量/销售额、累计销量/销售额及详情链接。名称与价格/日期分开保存；按商品ID去重，`observed_position` 为本次读取顺序，原始排名另存。可用 `--top N` 限制数量。空页结束、重复页标部分结果；阻挡或筛选失效时停止并保留已抓清单。输出 `meta.status/pages_visited/pages_ok/page_errors`，不能把请求页数当作实际成功页数。
+
+> **口径（重要）**：新品榜固定「三日销量」排名，**无 `date_type`/`date_value`（不支持日/周/月切换）、无「销量环比」列**。列表「商品分类」列只显示一级分类（如「手机与数码」），不显示三级细分；分类筛选走 `--category-id`/`--category-id2`（`l1_cid`/`l2_cid` URL 参数，已验证生效，分类按钮会显示目标二级分类名）。
+>
+> 未提供显式分类ID时，分类名匹配失败会报错，不默默扩大为全站；显式分类ID决定页面范围，名称不作为商品全文筛选词。仅传二级ID时必须从有效分类树补齐一级ID，否则要求显式提供一级ID。新品榜不支持 `--days/--period/--date-type/--date-value`，传入会报错，不伪装为其它周期。
+>
+> **近7天与趋势需详情补抓**：`analyze-phonecase-trend.mjs --dir <输入目录> --top 50` 默认后台运行，读取该目录 `saleslist.json/newproducts.json`，输出 `result.json`；也可用 `--sales/--new-products/--out` 显式指定文件。仅在详情 `#overview` 确认近7天并收到同商品、同周期逐日数据后，计算该序列的最近3日与之前4日。不得用榜单三日数与另一天抓取的7日数直接相减；缺日期/指标保持未知，不根据“7日≈3日”断言商品年龄。配套Markdown/HTML报告用 `--file result.json` 或 `--dir <目录>`，共用同一趋势规则、实际样本数与元数据。
 
 ## 店铺榜分析（品牌 / 分类 / 评分）
 
@@ -127,19 +158,19 @@ node scripts/rpa/analyze-shop-detail.mjs --file outputs/<批次>/<店铺名>_det
 
 ## 店铺趋势涨跌（近N天 vs 上个N天 + 商品归因）
 
-用户要「某店铺最近 N 天总销量/GMV、跟上个 N 天比涨还是跌、哪个商品拖后腿/领涨」时，用 `shop-trend`。数据源是店铺详情页的 `recentData`（店铺级 90 天逐日）与商品详情页 `overview`（商品级 90 天逐日），涨跌按逐日增量精确求和，非估算。店铺名/国家/对比天数均为变量：
+用户要「某店铺最近 N 天总销量/GMV、跟上个 N 天比涨还是跌、哪些商品下跌/上涨」时，用 `shop-trend`。读取页面自然返回的店铺/商品近90天逐日数据，按同一截止日比较两个完整、连续、等长周期；缺日期或指标时保持未知。`--days` 为1到45的整数，默认30；店铺名、国家和天数均为变量：
 
 ```bash
 # 泰国 Steapex 店铺，近30天 vs 上个30天涨跌 + 商品归因
-node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop Steapex --country 泰国 --days 30 --headed true --out outputs/<批次>/shop-trend.json
+node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop Steapex --country 泰国 --days 30 --out outputs/<批次>/shop-trend.json
 
 # 已知店铺 ID 直接抓（跳过搜索）
 node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop-id 7495956634965609461 --country 泰国 --days 30 --out xxx.json
 ```
 
-产出 JSON + 同名 `.md`（店铺整体涨跌 + 拖后腿/领涨商品归因）。字段：近N天/上个N天的销量与GMV、环比百分比、每个商品的涨跌。
+产出 JSON + 同名 `.md`，包含真实比较日期、店铺涨跌、商品涨跌及覆盖范围。商品清单保留当前销量为0的条目，按独立商品表分页，`--pages` 是最多采集的商品页数（默认100）。能在商品表确认近90天时才按90天标记；否则保留页面实际周期。页面可见历史清单或趋势不完整时标为 `partial`，不能当作全店归因。
 
-> **实现要点**：`recentData?date_type=90`、`overview?d_type=90` 均有 MSG_SAFE_0001 签名，不能直接 fetch；须「点击页面「近90天」周期按钮 + 监听响应」拿 90 天逐日数据。默认不加载图片（加速），仅当点击周期触发腾讯验证码时才自动放行图片并等待人工完成。
+> **实现要点**：监听必须在页面请求发出前建立，切换商品/页码/周期前 `reset`，按ID、周期和请求代次隔离响应；不主动调用接口。命中登录、验证或权限阻挡时停止并保存已有结果，不在后台空等人工、不自动打开前台窗口。用户单独完成人工登录/验证后可重跑。
 
 ## 店铺对比（某类目 GMV 前 N 店铺逐个对比）
 
@@ -147,12 +178,12 @@ node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop-id 7495956634965609461 --cou
 
 ```bash
 # 泰国运动鞋类目，近30天 GMV 前10店铺，跟 Steapex 对比
-node scripts/rpa/fastmoss-rpa.mjs shop-compare --country 泰国 --category 运动鞋 --top 10 --days 30 --benchmark Steapex --headed true --out xxx.json
+node scripts/rpa/fastmoss-rpa.mjs shop-compare --country 泰国 --category 运动鞋 --top 10 --days 30 --benchmark Steapex --out xxx.json
 ```
 
 产出 JSON + 同名 `.md`（前N店铺对比表：GMV / 价格区间 / 平均佣金 / 达人数量 / 分类排名）。
 
-> **口径**：GMV 按商品榜（二级类目）按店铺聚合，非店铺整体 GMV；达人数量为店铺详情页累计口径；佣金为上榜商品平均；价格区间已过滤鞋垫等配件。
+> **口径**：GMV 是已采集榜单商品的店铺汇总，周期以页面 `date_type/date_value` 为准；金额缺失的店铺不参加排名。默认不设置最低价格、不按运动鞋规则过滤其它品类。需要限制时显式传 `--min-price 50`（站点币种）或 `--exclude-keywords 鞋垫,鞋带,insole`。达人数量为店铺累计口径，佣金为已知上榜商品平均。
 
 ## 店铺达人挖取（从竞品店铺挖带货达人）
 
@@ -160,7 +191,7 @@ node scripts/rpa/fastmoss-rpa.mjs shop-compare --country 泰国 --category 运�
 
 ```bash
 # 挖 Steapex 的带货达人前20（BD 挖人直接对标）
-node scripts/rpa/fastmoss-rpa.mjs shop-authors --shop Steapex --country 泰国 --top 20 --headed true --out xxx.json
+node scripts/rpa/fastmoss-rpa.mjs shop-authors --shop Steapex --country 泰国 --top 20 --out xxx.json
 ```
 
 产出 JSON + 同名 `.md`（达人清单：粉丝 / 贡献GMV / 销量 / 带货商品数 / 视频GPM / 直播GPM + 达人主页链接）。
@@ -172,7 +203,7 @@ node scripts/rpa/fastmoss-rpa.mjs shop-authors --shop Steapex --country 泰国 -
 用户要「全面看透一家店铺：主营什么品类、用什么达人、怎么成交、价格怎么分布、哪些视频/直播爆款」时，用 `shop-insight`。它一次打开店铺详情页，抓 6 个分析接口，输出综合洞察报告。店铺名/国家均为变量：
 
 ```bash
-node scripts/rpa/fastmoss-rpa.mjs shop-insight --shop Steapex --country 泰国 --headed true --out xxx.json
+node scripts/rpa/fastmoss-rpa.mjs shop-insight --shop Steapex --country 泰国 --out xxx.json
 ```
 
 产出 JSON + 同名 `.md`，六部分：①品类结构（二级/三级分类销量占比）②达人结构（粉丝区间/达人类型分布）③成交结构（渠道/内容形式占比）④价格分布（商品价格分档）⑤爆款视频（含 AD 标记）⑥爆款直播（含店铺自播标记）。
@@ -255,7 +286,7 @@ node scripts/rpa/run-background.mjs product-roi --country 美国 --ids 173219842
 
 ```bash
 # 美区耳机前10：影音设备(909320)榜单内按「耳机」过滤，近7天榜，抓近28天投流ROI
-node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 909320 --category 耳机 --top 10 --days 7 --pages 6 --period 28 --headed true --out outputs/<批次>/耳机前10ROI.json
+node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 909320 --category 耳机 --top 10 --days 7 --pages 6 --period 28 --out outputs/<批次>/耳机前10ROI.json
 ```
 
 变量清单（改一个词即复用）：
@@ -271,9 +302,9 @@ node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 9
 | ROI 周期 | `--period` | 28 | 7/28/90 |
 | 排序 | `--sort` | gmv | 榜单排序 |
 
-产出：JSON + 同名 `.md` 报告，报告含「每商品自动优势标签（投流效率冠军/投流规模最大/周销量冠军/高客单/低价走量/品牌矩阵）+ 类目洞察（ROI 区间、品牌格局、路线分化）+ 每个商品 FastMoss 详情链接」。
+产出 JSON + 同名 `.md`。报告使用当前样本可计算的ROI区间、规模、榜单销量、标价与店铺分布生成标签，并保留商品详情链接；不由这些字段推断利润、行业竞争阶段或固定的低价/高价路线。显式 `--date-value` 必须在页面生效，否则停止；榜单与ROI周期分别披露。
 
-> **注意**：投流 ROI 串行抓取（并发多 tab 后台降频会丢数据，实测并发 4 时 9/10 成功 1 个失败）；`--headed true` 用于前台观察/规避 headless 风控；同一 `.browser-profile` 同时只跑一个进程。
+> **注意**：投流 ROI 默认串行、无界面；只有用户明确要求前台演示或调试时才加 `--headed true`。同一 `.browser-profile` 同时只跑一个进程，不能通过切换工具或窗口绕过站点验证或权限限制。
 
 本地建库、检索和档案工具见 [references/local-pool.md](references/local-pool.md)。自然语言由本技能拆解并在网页核验，脚本的有限规则解析不替代全条件验证。每批网页证据转为标准JSON后入库，保留历史快照和缺失字段。
 
@@ -330,6 +361,10 @@ node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 9
 
 ## 当前验证范围
 
+2026-11-11 新品榜与配套趋势/报告脚本完成代码核对和修复：ID去重、分类/周期参数核验、分页停止、部分结果保存、详情近7天确认及同窗口逐日趋势。临时检查仅在内存和本地拦截页面执行，没有新增测试文件，也没有重新采集真实站点。详见 [新品榜维护记录](operations/2026-11-11-new-products-fixes.md)。
+
+2026-11-11 修正响应隔离、周期完整性、零销量商品归因、商品榜显式日期、跨品类筛选、报告固定结论及重复等待。新增回归使用本地拦截页面与无界面浏览器，不访问真实FastMoss；本轮未追加真实站点批量验证。修改与数据字段约定见 [operations/2026-11-11-review-fixes.md](operations/2026-11-11-review-fixes.md)。
+
 2026-11-10 前台核对美国站商品 `1732198421819330715` 的近28天投流分析：销售额 $6.11万、广告消耗 $2.76万，计算 ROI 约2.21，平台 ROAS 2.22。新增命令的本地无界面页面测试覆盖模块取值、切周期刷新和相同金额；这不等于真实网站批量后台采集已经实测。
 
 2026-11-09 已跑通完整 RPA 链路（美国站、箱包类目、粉丝 5000–50000）：
@@ -338,3 +373,7 @@ node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 9
 - 离线分析产出 `creators-final.json` / `final-top.json` / `competitor-shops.json` / `evidence/*.json` / `多维度分析报告.md`。
 - 详情页 4 张表是懒加载，串行 + 监听接口响应是唯一可靠路径（并发丢数据）。
 - 详见 [operations/2026-11-09-us-bags-review.md](operations/2026-11-09-us-bags-review.md)。
+
+### 三级分类参数规则
+
+商品榜、品类ROI、新品榜与视频商品榜共用父子分类校验。仅传 `--category-id3` 时从分类缓存补齐父级；未知三级需同时提供正确的一二级ID。名称与显式ID冲突会报错，不静默覆盖。分类采集失败或降级为两级时保留已有完整缓存。

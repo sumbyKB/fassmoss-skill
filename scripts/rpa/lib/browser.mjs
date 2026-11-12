@@ -67,6 +67,20 @@ export function enableImages(context) {
   blockImages.set(context, false);
 }
 
+/** 只读取可见拦截状态；后台任务不得通过弹窗或等待人工来继续采集。 */
+export function pageAccessBlocker() {
+  const text = document.body?.innerText || '';
+  if (document.querySelector('#tCaptchaMaskLayer') || /Web\s*Security|Access Denied/i.test(document.title) || /正在保护|进一步确认|请求 ID/.test(text)) return 'FastMoss 需要人工完成访问验证；请单独打开登录窗口处理后重试';
+  if (/功能使用次数已达|已达.*(?:上限|限制)|升级.*(?:解锁|查看完整)/.test(text)) return 'FastMoss 网页次数或权限受限';
+  if (/您当前是游客身份/.test(text) || [...document.querySelectorAll('button')].some(e => /^(登录|登 录|Log in|Sign in)$/.test(e.innerText.trim()))) return 'FastMoss 当前采集窗口未登录';
+  return null;
+}
+
+export async function assertPageAccess(page) {
+  const message = await safeEval(page, pageAccessBlocker);
+  if (message) { const error = new Error(message); error.code = 'FASTMOSS_BLOCKED'; throw error; }
+}
+
 /** SPA 会在 goto 后再跳一次（加 page 参数），evaluate 要能容忍 context 被销毁 */
 export async function safeEval(page, fn, arg) {
   for (let i = 0; i < 4; i++) {
@@ -93,16 +107,20 @@ export async function assertLoggedIn(page, detectUrl) {
         /^(登录|登 录|Log in|Sign in)$/i.test((e.innerText || '').trim())
       ).length;
       const hasUser = /旗舰版|专业版|免费版|基础版/.test(t) || /\d{3}\*{4}\d{4}/.test(t);
-      const risk = /正在保护|进一步确认|请求 ID/.test(t);
+      const risk = !!document.querySelector('#tCaptchaMaskLayer') || /Web\s*Security|Access Denied/i.test(document.title) || /正在保护|进一步确认|请求 ID/.test(t);
       return { hasUser, loginBtns, text: t.length, risk };
     }).catch(() => ({ hasUser: false, loginBtns: 0, text: 0, risk: false }));
-    if (st.hasUser && st.loginBtns === 0) return;
     if (st.risk) {
       // 命中风控页：给出请求 ID 与建议，而非误判为「未登录」
-      throw new Error('FastMoss 触发风控验证（页面提示需人工确认）。请在浏览器里完成验证后重试；若持续出现，复制请求 ID 联系客服。');
+      const error = new Error('FastMoss 触发风控验证。请单独运行登录窗口完成人工验证后重试。');
+      error.code = 'FASTMOSS_BLOCKED';
+      throw error;
     }
+    if (st.hasUser && st.loginBtns === 0) return;
     if (st.loginBtns > 0 && !st.hasUser) {
-      throw new Error('FastMoss 未登录：请运行 node scripts/rpa/login-window.mjs 完成登录并关闭窗口，然后重跑。');
+      const error = new Error('FastMoss 未登录：请运行 node scripts/rpa/login-window.mjs 完成登录并关闭窗口，然后重跑。');
+      error.code = 'FASTMOSS_BLOCKED';
+      throw error;
     }
     await new Promise((r) => setTimeout(r, 400));
   }

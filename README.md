@@ -61,6 +61,13 @@ node scripts/rpa/fastmoss-rpa.mjs categories --country 泰国 --out outputs/cate
 node scripts/rpa/fastmoss-rpa.mjs product --country 泰国 --days 14 --category-id 6 --pages 20 --out outputs/<批次>/products.json
 node scripts/rpa/analyze-product.mjs --dir outputs/<批次> --category 运动鞋 --brand 品牌名 --top 20
 
+# 三级分类（如手机壳）：--category 手机壳 自动匹配 l3_cid=601925（保护壳、屏幕保护膜、皮肤）
+node scripts/rpa/fastmoss-rpa.mjs product --country 美国 --category 手机壳 --days 7 --pages 20 --out outputs/<批次>/products.json
+node scripts/rpa/fastmoss-rpa.mjs hot-video --country 美国 --category 手机壳 --pages 20 --out outputs/<批次>/hotvideo.json
+
+# 新品榜（近期上架商品，固定「三日销量」口径，无近7天/环比）
+node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category-id 16 --category-id2 909064 --pages 20 --out outputs/<批次>/newproducts.json
+
 # 商品投流ROI：逐个进入商品详情的「投流分析」，销售额 / 同周期广告消耗
 node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --keyword earbuds --pages 1 --top 10 --period 28 --out outputs/<批次>/product-roi.json
 node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --ids-file outputs/<批次>/products.json --period 28 --out outputs/<批次>/product-roi.json
@@ -119,10 +126,12 @@ AGENTS.md / CLAUDE.md / GEMINI.md   # 各工具入口路由
 ## 离线测试
 
 ```text
-node --test scripts/rpa/cli.test.mjs scripts/rpa/data-rules.test.mjs scripts/rpa/lifecycle.test.mjs scripts/rpa/product-roi.test.mjs
+node --test scripts/rpa/cli.test.mjs scripts/rpa/data-rules.test.mjs scripts/rpa/lifecycle.test.mjs scripts/rpa/product-roi.test.mjs scripts/rpa/tracker.test.mjs scripts/rpa/shop-analysis.test.mjs scripts/rpa/workflow.test.mjs
 ```
 
-测试覆盖参数校验、数据规则、离线分析重复运行、各命令的异步收尾、默认无界面、商品投流模块取值与周期刷新。商品ROI页面测试需要上述RPA环境（Playwright + 系统Chrome），使用本地拦截页面和独立无界面浏览器，不使用账户、不访问真实FastMoss。真实网页采集仍需单独实测。
+测试覆盖参数校验、数据规则、离线分析重复运行、每个命令成功/失败时的实际收尾顺序、旧响应隔离、完整日期对比、零销量商品、跨品类排名、商品日期生效、搜索结果核验、商品分页和验证中止。页面测试需要上述RPA环境（Playwright + 系统Chrome），使用本地拦截页面和独立无界面浏览器，不使用账户、不访问真实FastMoss。真实网页采集仍需单独实测。
+
+店铺趋势的 `--days` 支持1到45，只有两个完整等长周期才计算环比；报告中的 `partial` 表示页面清单或逐日数据覆盖不足。店铺对比默认不筛最低售价或配件；可用 `--min-price` 和 `--exclude-keywords` 显式指定。商品榜指定历史日期时用 `--date-value`，页面未生效会报错。详细修正记录见 [审查问题处理](operations/2026-11-11-review-fixes.md)。
 
 ## 数据边界（摘要，全文见 SKILL.md）
 

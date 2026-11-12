@@ -73,11 +73,12 @@ node scripts/rpa/analyze-product.mjs --dir outputs/<批次> --category 运动鞋
 
 ## 分类精确筛选的现状（已解决）
 
-FastMoss 商品分类是三级（一级→二级→三级），一级分类通过 `l1_cid` 参数精确筛选（已实测：鞋靴=6、箱包=7、美妆个护=14 等）。二级/三级分类不通过 URL 参数，而是靠商品响应体的 `all_category_name` 字段（完整三级路径）在分析层过滤。
+FastMoss 商品分类是三级（一级→二级→三级），**三级都支持 URL 参数精确筛选**（2026-11-12 实测）：一级 `l1_cid`、二级 `l2_cid`、三级 `l3_cid`（如 手机壳 = 保护壳、屏幕保护膜、皮肤 = 601925）。
 
-- **一级分类**：`categories` 命令抓「分类名→l1_cid」映射，`--category-id` 精确筛。
-- **二级/三级**：`--category` 关键词在商品「分类」字段上过滤。
-- 分类 UI 点击（Cascader 面板）会触发腾讯验证码（平台反爬），本技能不绕过验证码；用 `--category-id` 走 URL 参数即可，无需点 UI。
+- **一级**：`--category-id` → `l1_cid`（鞋靴=6、箱包=7、美妆个护=14 等）。
+- **二级**：`--category-id2` → `l2_cid`（如 运动鞋=834696、手机配件=909064）。
+- **三级**：`--category-id3` → `l3_cid`（如 手机壳=601925）。`categories` 命令已从 `/api/live/filterInfo` 抓全三级树（30 一级 + 247 二级 + 2370 三级，含 ID）到 `categories.json` 的 `l3_categories`，和一二级一样自动匹配；`--category 手机壳` / `--category 移动电源` 直接可用。
+- UI 点击 Cascader 可能触发腾讯验证码（平台反爬），本技能不绕过验证码；优先用 URL 参数（`--category-id` / `--category-id2` / `--category-id3`）而非点 UI。
 
 ## 边界
 
@@ -87,7 +88,33 @@ FastMoss 商品分类是三级（一级→二级→三级），一级分类通�
 - 无订单级客单价、退货率、真实品牌方身份（店铺名≈品牌是推断）。
 - 不绕过验证码、付费权限或平台限制。
 
+## 新品榜（近期上架商品，三日销量口径）
+
+用户要「看某类目最近上架商品、追踪新品爬坡」时，用 `new-products` 命令抓 `/zh/e-commerce/newProducts`（导航「商品 → 新品榜」，副标题「追踪近期上架的商品」）。与销量榜的关键差异：**新品榜固定「三日销量」排名，无 `date_type`/`date_value`（不能切日/周/月榜），无「销量环比」列**。
+
+```bash
+node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category-id 16 --category-id2 909064 --pages 20 --out outputs/<批次>/newproducts.json
+```
+
+- **列**：排名 | 商品（含售价区间 + 上架时间） | 国家/地区 | 所属店铺 | 商品分类 | 佣金比例 | 三日销量 | 三日销售额 | 总销量 | 总销售额 | 操作。
+- **分类筛选**：`--category-id`/`--category-id2`/`--category-id3`（l1_cid/l2_cid/l3_cid URL 参数，已验证生效；如 `--category 手机壳` 自动匹配三级 601925）。注意列表「商品分类」列只显示一级分类（如「手机与数码」），不显示三级细分，且个别商品存在平台误分类，按细分品类筛选时需结合商品名关键词。
+- **无近7天/环比**：需在详情总览确认近7天。趋势使用详情同一个完整、连续近7天逐日序列：最近3日日均÷之前4日日均，>1.1上升、<0.9下滑，其余稳定；基期零销量而近期有销量标为「新近起量」。缺数据为未知，不能把榜单三日数与不同截止日的7日数相减。
+
+命令按商品ID去重，支持 `--top N`；空页或重复页停止。分类匹配失败、一级/二级ID冲突及不支持的日期参数都会明确失败。部分结果在 JSON 的 `meta.status` 和实际读取页数中披露，验证码/权限阻挡不会继续翻页或自动切前台。
+
+手机壳两榜分析示例（输入目录和结果文件均可复用，不绑定某一天）：
+
+```text
+node scripts/rpa/analyze-phonecase-trend.mjs --dir outputs/phonecase --top 50
+node scripts/rpa/render-phonecase-report.mjs --file outputs/phonecase/result.json
+node scripts/rpa/render-phonecase-report-html.mjs --file outputs/phonecase/result.json
+```
+
+输入为该目录的 `saleslist.json` 与 `newproducts.json`，需要包含国家与币种；也可传 `--sales`、`--new-products`、`--country`、`--out`。只有明确要求前台观察时加 `--headed true`。旧结果没有近7天周期/逐日证据时，报告将原有趋势标为未知；国家、榜单日期、数量与缺失原因均由数据生成，不沿用固定的11条/5条结论。
+
 ## 商品投流 ROI
+
+商品榜支持 `--date-value` 显式指定历史日期，例如月榜 `product --country 美国 --days 30 --date-value 2026-09 ...`。参数会传入第一页并核对页面有效值；未指定时才采用平台的默认有效日期。第一页加载后直接提取，后续分页保持同一日期，不重复打开第一页。
 
 业务要商品 ROI 时，先搜索商品，再逐个进入 `/zh/e-commerce/detail/<商品ID>`，点击「投流分析」（锚点 `#putData`），读取该模块同周期的「销售额」与「广告消耗」。公式：**投流分析销售额（GMV）÷ 广告消耗**。
 

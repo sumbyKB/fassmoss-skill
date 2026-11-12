@@ -5,8 +5,8 @@ import { BASE, SKILL_ROOT, resolveCountry, COUNTRY_LABELS, REGION_BY_LABEL } fro
 import { log } from '../lib/cli.mjs';
 import { openBrowser, safeEval, assertLoggedIn, switchCountry } from '../lib/browser.mjs';
 import { poolWithPage } from '../lib/pool.mjs';
-import { resolveCategoryId } from '../lib/categories.mjs';
-import { parseAmount } from '../data-rules.mjs';
+import { resolveCategoryOptions } from '../lib/categories.mjs';
+import { parseAmount, parsePriceRange } from '../data-rules.mjs';
 import { productRoiOptions, searchProductRoiCandidates, scrapeProductRoi, renderProductRoiReport, PRODUCT_ROI_FORMULA } from '../product-roi.mjs';
 
 const PRODUCT_BASE = `${BASE}/e-commerce/saleslist`;
@@ -25,12 +25,13 @@ export function dateTypeOf(days) {
  * （实测：date_value 传「今天」会返回空，平台有效日期是「昨天」的日榜）。
  * 首次加载后读回 location.href 里的真实 date_type/date_value 再翻页。
  */
-function buildProductUrl({ dateType, dateValue, category, categoryId, categoryId2, page = 1, sort, region } = {}) {
+function buildProductUrl({ dateType, dateValue, category, categoryId, categoryId2, categoryId3, page = 1, sort, region } = {}) {
   const qs = new URLSearchParams();
   if (dateType) qs.set('date_type', String(dateType));
   if (dateValue) qs.set('date_value', String(dateValue));
   if (categoryId) qs.set('l1_cid', String(categoryId));   // 一级分类 ID（精确筛选，如 鞋靴=6、箱包=7、美妆个护=14）
   if (categoryId2) qs.set('l2_cid', String(categoryId2)); // 二级分类 ID（更细筛选，如 运动鞋=834696）
+  if (categoryId3) qs.set('l3_cid', String(categoryId3)); // 三级分类 ID（如 手机壳=保护壳屏幕膜皮肤 601925）
   if (category) qs.set('category', String(category));
   if (sort) qs.set('sort', String(sort));
   if (region) qs.set('region', String(region));
@@ -40,7 +41,7 @@ function buildProductUrl({ dateType, dateValue, category, categoryId, categoryId
 
 export { buildProductUrl };
 
-/** 等待商品榜表格有真实数据行（≥2 个真实数据行，排除「暂无数据」占位与单行加载态） */
+/** 等待商品榜出现真实数据行（含仅有一个商品的结果，排除空白测量行）。 */
 async function waitProductRows(page, { timeout = 15000 } = {}) {
   await page.waitForFunction(
     () => {
@@ -49,7 +50,7 @@ async function waitProductRows(page, { timeout = 15000 } = {}) {
       const rows = [...t.querySelectorAll('tbody tr')].filter(
         (r) => r.querySelectorAll('td').length >= 5 && (r.innerText || '').replace(/\s/g, '').length > 0
       );
-      return rows.length >= 2;
+      return rows.length >= 1;
     },
     undefined,
     { timeout }
@@ -89,12 +90,29 @@ const PRODUCT_EXTRACT_FN = function () {
 };
 
 /** 抓单页商品榜 */
+async function readProductPage(page) {
+  await waitProductRows(page);
+  return await safeEval(page, PRODUCT_EXTRACT_FN);
+}
+
+/** 首屏只访问一次；显式日期必须生效，未指定日期时才探测平台默认日期。 */
+export async function openProductBoard(page, options) {
+  await page.goto(buildProductUrl({ ...options, page: 1 }), { waitUntil: 'domcontentloaded' });
+  const payload = await readProductPage(page);
+  const effective = await safeEval(page, () => {
+    const url = new URL(location.href);
+    return { date_type: url.searchParams.get('date_type'), date_value: url.searchParams.get('date_value') };
+  });
+  if (options.dateValue && effective.date_value !== String(options.dateValue)) throw new Error('商品榜指定日期未生效：' + options.dateValue);
+  if (effective.date_type && Number(effective.date_type) !== Number(options.dateType)) throw new Error('商品榜指定周期未生效');
+  return { ...payload, effective, url: page.url() };
+}
+
 export async function grabProductPage(page, url) {
   const t0 = Date.now();
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   const navMs = Date.now() - t0;
-  await waitProductRows(page);
-  const payload = await safeEval(page, PRODUCT_EXTRACT_FN);
+  const payload = await readProductPage(page);
   return { ...payload, url, timings: { navMs, totalMs: Date.now() - t0 } };
 }
 
@@ -108,19 +126,7 @@ export async function cmdProduct(opts) {
   const dateType = Number(opts['date-type'] || dateTypeOf(days));
   const dateValue = opts['date-value'] || null;
   const sort = opts.sort || null;
-  let categoryId = opts['category-id'] || opts.cid || null;   // 一级分类 ID（l1_cid，精确筛选）
-  let categoryId2 = opts['category-id2'] || null;             // 二级分类 ID（l2_cid，更细筛选）
-  // 若传了中文分类名（--category）但没传 --category-id，自动从分类树匹配 ID
-  if (!categoryId && opts.category && !/^\d+$/.test(String(opts.category))) {
-    const resolved = resolveCategoryId(opts.category, opts['categories-file']);
-    if (resolved) {
-      categoryId = resolved.l1_cid;
-      if (resolved.level === 2 && resolved.l2_code) categoryId2 = resolved.l2_code;
-      log(`分类「${opts.category}」自动匹配到「${resolved.matched}」(l1_cid=${resolved.l1_cid}${resolved.level === 2 ? '，二级 l2_cid=' + resolved.l2_code : ''})`);
-    } else {
-      log(`分类「${opts.category}」未在分类树匹配到 ID，将抓全量后按关键词过滤`);
-    }
-  }
+  const { categoryId, categoryId2, categoryId3 } = resolveCategoryOptions(opts);
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `products-${Date.now()}.json`);
   const t0 = Date.now();
 
@@ -130,30 +136,21 @@ export async function cmdProduct(opts) {
   const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
   const region = country ? (REGION_BY_LABEL[country] || null) : null;
 
-  // 第一次：只带 date_type（不带 date_value，让平台跳到有效日期），读回真实 date_value
-  const firstUrl = buildProductUrl({ dateType, category: opts.category, categoryId, categoryId2, sort, region, page: 1 });
   const firstPage = context.pages()[0];
-  await firstPage.goto(firstUrl, { waitUntil: 'domcontentloaded' });
-  await waitProductRows(firstPage);
-  const effective = await safeEval(firstPage, () => {
-    const u = new URL(location.href);
-    return { date_type: u.searchParams.get('date_type'), date_value: u.searchParams.get('date_value') };
-  }).catch(() => ({ date_type: null, date_value: null }));
+  const firstPayload = await openProductBoard(firstPage, { dateType, dateValue, category: opts.category, categoryId, categoryId2, categoryId3, sort, region });
+  const effective = firstPayload.effective;
   const effDateType = effective.date_type || String(dateType);
-  const effDateValue = effective.date_value || dateValue;
+  const effDateValue = dateValue || effective.date_value;
 
   // 用读回的有效日期翻页抓取。第 1 页复用 firstPage（已加载），只对第 2 页起开新 tab，
   // 避免并发 1 时也开出「空白首 tab + 工作 tab」两个窗口。
   const urls = Array.from({ length: pages }, (_, i) =>
-    buildProductUrl({ dateType: Number(effDateType), dateValue: effDateValue, category: opts.category, categoryId, categoryId2, sort, region, page: i + 1 })
+    buildProductUrl({ dateType: Number(effDateType), dateValue: effDateValue, category: opts.category, categoryId, categoryId2, categoryId3, sort, region, page: i + 1 })
   );
 
   // 第 1 页：直接复用 firstPage 抓取（它已经 goto 到 page=1）
   const results = new Array(pages);
-  results[0] = await (async () => {
-    try { return await grabProductPage(firstPage, urls[0]); }
-    catch (e) { return { url: urls[0], headers: [], rows: [], error: String(e).slice(0, 120) }; }
-  })();
+  results[0] = firstPayload;
 
   // 第 2 页起：串行（concurrency=1）时直接复用 firstPage 单窗口顺序抓，不多开任何 tab；
   // 仅当用户显式 --concurrency>1 时才开额外 tab 并发。
@@ -193,6 +190,7 @@ export async function cmdProduct(opts) {
     category: opts.category || null,
     category_id: categoryId || null,
     category_id2: categoryId2 || null,
+    category_id3: categoryId3 || null,
     sort: sort || '默认（销量）',
     pages_requested: pages,
     pages_ok: results.filter((r) => !r.error).length,
@@ -273,16 +271,12 @@ export async function cmdProductRoi(opts) {
 
 /** 价格区间取中位数：`$14.50 - 36.00` → 25.25；`$17.00` → 17 */
 function parsePriceMid(priceRaw) {
-  if (priceRaw == null) return null;
-  const nums = [...String(priceRaw).matchAll(/\d+(?:\.\d+)?/g)].map((m) => Number(m[0]));
-  if (!nums.length) return null;
-  const min = Math.min(...nums);
-  const max = Math.max(...nums);
-  return Math.round(((min + max) / 2) * 100) / 100;
+  const price = parsePriceRange(priceRaw);
+  return price ? Math.round(((price.min + price.max) / 2) * 100) / 100 : null;
 }
 
 /** 数据驱动的报告：前 N 品类商品 + ROI + 自动优势标签 + 类目洞察。金额/标签全由数据算出，不硬编码。 */
-function renderCategoryRoiReport({ meta, products }) {
+export function renderCategoryRoiReport({ meta, products }) {
   const cell = (v) => String(v ?? '未知').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
   const short = (s, n = 46) => { const t = String(s ?? '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n) + '…' : t; };
   // 归一化数值：投流GMV、广告消耗、周销量、客单价中位数
@@ -308,34 +302,34 @@ function renderCategoryRoiReport({ meta, products }) {
   const prices = norm.map((p) => p.price_mid).filter((v) => v != null);
   const maxPrice = prices.length ? Math.max(...prices) : null;
   const minPrice = prices.length ? Math.min(...prices) : null;
-  const shopCount = {};
+  const shopCount = Object.create(null);
   norm.forEach((p) => { const s = p.shop || '未知'; shopCount[s] = (shopCount[s] || 0) + 1; });
   const tags = norm.map((p) => {
     const t = [];
     if (maxRoi != null && p.roi === maxRoi) t.push('投流效率冠军');
     if (maxGmv > 0 && (p.gmv_num || 0) === maxGmv) t.push('投流规模最大');
-    if (maxUnits > 0 && (p.units_num || 0) === maxUnits) t.push('周销量冠军');
-    if (maxPrice != null && p.price_mid === maxPrice) t.push('高客单');
-    if (minPrice != null && p.price_mid === minPrice && minPrice !== maxPrice) t.push('低价走量');
-    if ((shopCount[p.shop || '未知'] || 0) >= 2) t.push('品牌矩阵');
-    if (!t.length) t.push('细分/常规');
+    if (maxUnits > 0 && (p.units_num || 0) === maxUnits) t.push('样本榜单销量最高');
+    if (maxPrice != null && p.price_mid === maxPrice) t.push('样本标价最高');
+    if (minPrice != null && p.price_mid === minPrice && minPrice !== maxPrice) t.push('样本标价最低');
+    if ((shopCount[p.shop || '未知'] || 0) >= 2) t.push('同店多款入样');
+    if (!t.length) t.push('无额外样本标签');
     return t;
   });
   const title = `${meta.category || '目标'}类目前${products.length} 投流 ROI 分析`;
   const lines = [
     `# ${title}`,
     '',
-    `> 采集时间：${(meta.collected_at || '').slice(0, 10)} ｜ 国家/币种：${meta.country} / ${meta.currency} ｜ 榜单：近${meta.days}天${meta.board_note || ''}（按 ${meta.category || '关键词'} 过滤）｜ ROI 周期：近${meta.period_days}天投流分析`,
+    `> 采集时间：${(meta.collected_at || '').slice(0, 10)} ｜ 国家/币种：${meta.country} / ${meta.currency} ｜ 榜单：date_type=${meta.date_type ?? '未知'} date_value=${meta.date_value ?? '未知'} ${meta.board_note || ''}（按 ${meta.category || '关键词'} 过滤）｜ ROI 周期：近${meta.period_days}天投流分析`,
     '',
     '## 一、数据口径',
     '',
     `- **ROI 公式** = 投流分析销售额(GMV) ÷ 同周期广告消耗（保留平台 ROAS 供核对，不反推 GMV）`,
-    `- **排名依据**：近${meta.days}天榜单内、目标品类商品的榜内名次`,
-    `- **注意**：榜单周期(近${meta.days}天) ≠ ROI 周期(近${meta.period_days}天)；投流 ROI ≠ 净利润 ROI（未含商品成本/佣金/退款）`,
+    `- **排名依据**：上述有效榜单内目标品类商品的名次；请求的近${meta.days}天按平台映射，实际以 date_type/date_value 为准`,
+    `- **注意**：平台自然榜单周期与 ROI 近${meta.period_days}天分别披露；投流 ROI 不代表净利润 ROI（未含商品成本/佣金/退款）`,
     '',
     '## 二、前 N 品类 ROI 与优势',
     '',
-    '| 排名 | 商品 | 店铺 | 周销量 | 客单价 | 投流GMV | 广告消耗 | ROI | 优势 | 链接 |',
+    '| 排名 | 商品 | 店铺 | 榜单销量 | 售价区间 | 投流GMV | 广告消耗 | ROI | 样本标签 | 链接 |',
     '|---|---|---|---|---|---|---|---|---|---|',
   ];
   norm.forEach((p, i) => {
@@ -345,8 +339,7 @@ function renderCategoryRoiReport({ meta, products }) {
   if (ok.length) {
     const lo = Math.min(...ok.map((p) => p.roi));
     const hi = Math.max(...ok.map((p) => p.roi));
-    const spread = hi - lo;
-    lines.push(`1. **ROI 区间 ${lo.toFixed(2)} ～ ${hi.toFixed(2)}**：${spread < 0.3 ? '极差小，投产效率高度收敛，品类进入稳态竞争，无暴利单品' : '极差较大，头部投产效率分化明显'}。`);
+    lines.push(`1. **本次 ${ok.length} 个可计算样本的 ROI 区间为 ${lo.toFixed(2)} ～ ${hi.toFixed(2)}**，区间宽度 ${(hi - lo).toFixed(2)}。`);
     const roiTop = norm.find((p) => p.roi === maxRoi);
     const gmvTop = norm.find((p) => (p.gmv_num || 0) === maxGmv && maxGmv > 0);
     lines.push(`2. **投流效率冠军**：${roiTop ? cell(short(roiTop.product)) + '（ROI ' + roiTop.roi.toFixed(2) + '）' : '未知'}；**投流规模冠军**：${gmvTop ? cell(short(gmvTop.product)) + '（投流GMV ' + cell(gmvTop.raw?.gmv) + '）' : '未知'}。`);
@@ -354,8 +347,8 @@ function renderCategoryRoiReport({ meta, products }) {
     lines.push('1. 本次未能计算任何 ROI，请检查投流模块采集状态。');
   }
   const brandLine = Object.entries(shopCount).sort((a, b) => b[1] - a[1]).map(([s, n]) => `${s}×${n}`).join('、');
-  lines.push(`3. **品牌格局**：${brandLine || '未知'}${Object.values(shopCount).some((n) => n >= 2) ? '——有品牌多席上榜，矩阵打法明显' : '——品牌分散，各占一席'}。`);
-  lines.push('4. **路线**：按客单价区分「低价走量」与「品牌溢价」两条路线，前者投入小、ROI 略高，后者规模大、客单价高。');
+  lines.push(`3. **样本店铺分布**：${brandLine || '未知'}。`);
+  if (prices.length) lines.push(`4. **样本售价区间中位数**：${minPrice} ～ ${maxPrice} ${meta.currency || ''}；这是标价信息，成交均价与利润未知。`);
   lines.push('', `> 金额中的万/亿是页面近似值，计算 ROI 与平台 ROAS 可能有舍入差异；投流 ROI 不含商品成本/佣金/退款，不代表净利润回报。`, '');
   return lines.join('\n');
 }
@@ -370,32 +363,7 @@ export async function cmdCategoryRoi(opts) {
   if (![7, 28, 90].includes(period)) throw new Error('ROI 周期只支持 7/28/90 天');
   const sort = opts.sort || 'gmv';
   const dateType = Number(opts['date-type'] || dateTypeOf(days));
-  let categoryId = opts['category-id'] || opts.cid || null;
-  let categoryId2 = opts['category-id2'] || null;
-  let boardLabel = null;
-  // 只给了二级分类 ID、没给一级时，从分类树自动补一级 ID（FastMoss 的 l2_cid 筛选需配合 l1_cid，否则翻页失效）
-  if (categoryId2 && !categoryId) {
-    try {
-      const catFile = opts['categories-file'] || path.join(SKILL_ROOT, 'outputs', 'categories.json');
-      if (fs.existsSync(catFile)) {
-        const cat = JSON.parse(fs.readFileSync(catFile, 'utf8'));
-        const l2 = (cat.l2_categories || []).find((c) => String(c.code) === String(categoryId2));
-        if (l2?.parent_code) { categoryId = String(l2.parent_code); boardLabel = l2.name || null; log(`二级分类 ${categoryId2} 自动补一级分类 ${categoryId}（${l2.parent_name || ''}）`); }
-      }
-    } catch (e) { /* 忽略，保持原值 */ }
-  }
-  // 分类自动匹配：category 命中分类树时用它限定榜单范围（如「箱包」→ l1_cid=7）
-  if (!categoryId2 && category && !/^\d+$/.test(String(category))) {
-    const resolved = resolveCategoryId(category, opts['categories-file']);
-    if (resolved) {
-      categoryId = resolved.l1_cid;
-      if (resolved.level === 2 && resolved.l2_code) categoryId2 = resolved.l2_code;
-      boardLabel = resolved.matched || null;
-      log(`分类「${category}」自动匹配到「${resolved.matched}」(l1_cid=${resolved.l1_cid}${resolved.level === 2 ? '，二级 ' + resolved.l2_code : ''})`);
-    } else {
-      log(`分类「${category}」未命中分类树，将抓榜单后按关键词过滤（耳机等细分品类建议配合 --category-id2 限定榜单范围）`);
-    }
-  }
+  const { categoryId, categoryId2, categoryId3, matched: boardLabel } = resolveCategoryOptions(opts);
   const outFile = path.resolve(opts.out || path.join(SKILL_ROOT, 'outputs', `${new Date().toISOString().slice(0, 10)}-category-roi`, `${category || '全部'}前${top}ROI.json`));
   if (!outFile.toLowerCase().endsWith('.json')) throw new Error('--out 请使用 .json 文件名');
   const reportFile = outFile.slice(0, -5) + '.md';
@@ -410,18 +378,16 @@ export async function cmdCategoryRoi(opts) {
   const region = REGION_BY_LABEL[countryLabel] || null;
 
   // 抓榜：第一页读回有效日期，再串行抓 pages 页（商品榜每页仅 10 条，串行稳定、不易风控）
-  const firstUrl = buildProductUrl({ dateType, categoryId, categoryId2, sort, region, page: 1 });
-  await page.goto(firstUrl, { waitUntil: 'domcontentloaded' });
-  await waitProductRows(page);
-  const effective = await safeEval(page, () => { const u = new URL(location.href); return { date_type: u.searchParams.get('date_type'), date_value: u.searchParams.get('date_value') }; }).catch(() => ({ date_type: null, date_value: null }));
+  const firstPayload = await openProductBoard(page, { dateType, dateValue: opts['date-value'], categoryId, categoryId2, categoryId3, sort, region });
+  const effective = firstPayload.effective;
   const effDateType = Number(effective.date_type || dateType);
   const effDateValue = effective.date_value || null;
 
   const board = [];
   const seen = new Set();
   for (let i = 1; i <= pages; i++) {
-    const url = buildProductUrl({ dateType: effDateType, dateValue: effDateValue, categoryId, categoryId2, sort, region, page: i });
-    const payload = await grabProductPage(page, url);
+    const url = buildProductUrl({ dateType: effDateType, dateValue: effDateValue, categoryId, categoryId2, categoryId3, sort, region, page: i });
+    const payload = i === 1 ? firstPayload : await grabProductPage(page, url);
     for (const row of payload.rows || []) {
       if (!row.id || seen.has(row.id)) continue;
       seen.add(row.id);
@@ -438,7 +404,7 @@ export async function cmdCategoryRoi(opts) {
 
   const products = picked.map((p) => ({ ...p, status: 'not_attempted', roi: null }));
   const save = () => {
-    const meta = { collected_at: new Date().toISOString(), country: countryLabel, currency, days, period_days: period, category: category || null, category_id: categoryId || null, category_id2: categoryId2 || null, sort, board_note: boardLabel ? `「${boardLabel}」榜单` : '全站榜单', roi_formula: PRODUCT_ROI_FORMULA, products_read: products.filter((p) => p.source_module === '#putData').length, roi_calculated: products.filter((p) => p.status === 'ok').length, timings: { launchMs, totalMs: Date.now() - t0 } };
+    const meta = { collected_at: new Date().toISOString(), country: countryLabel, currency, days, period_days: period, date_type: effDateType, date_value: effDateValue, category: category || null, category_id: categoryId || null, category_id2: categoryId2 || null, category_id3: categoryId3 || null, sort, board_note: boardLabel ? `「${boardLabel}」榜单` : '全站榜单', roi_formula: PRODUCT_ROI_FORMULA, products_read: products.filter((p) => p.source_module === '#putData').length, roi_calculated: products.filter((p) => p.status === 'ok').length, timings: { launchMs, totalMs: Date.now() - t0 } };
     fs.mkdirSync(path.dirname(outFile), { recursive: true });
     fs.writeFileSync(outFile, JSON.stringify({ meta, products }, null, 2), 'utf8');
     fs.writeFileSync(reportFile, renderCategoryRoiReport({ meta, products }), 'utf8');

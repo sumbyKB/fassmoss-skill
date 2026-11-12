@@ -8,6 +8,7 @@
 |---|---|---|---|
 | 达人 | `search` / `pipeline` | `analyze.mjs` | 达人搜索、达人详情（视频/直播/商品/店铺） |
 | 商品榜 | `product` | `analyze-product.mjs` | 商品销售榜（品类/品牌/价格带） |
+| 新品榜 | `new-products` | 列表自带（近7天/趋势进详情补抓） | 新品榜（近期上架商品，三日销量/总销量） |
 | 商品投流ROI | `product-roi` | 命令内生成报告 | 逐个商品详情的投流分析：销售额 / 广告消耗 |
 | 店铺 | `shop` | `analyze-shop.mjs` | 店铺榜（品牌/分类/评分/GMV） |
 | 分类 | `categories` | — | 分类名 → 分类 ID 映射 |
@@ -27,6 +28,8 @@
 | 业务大白话 | 关键词 | 命令 |
 |---|---|---|
 | 「近两周跑步鞋销售，按销售金额排」 | 细分品类/销售额/近两周 | `product --category-id 6 --days 14` + `analyze-product --category 运动鞋` |
+| 「美区手机壳新品榜」「看最近上架的商品」 | 新品榜/新品/新上架/三日销量 | `new-products --country 美国 --category-id 16 --category-id2 909064` |
+| 「美区手机壳销量榜」「看手机壳近7天销量」 | 手机壳/手机保护壳/三级分类 | `product --country 美国 --category 手机壳 --days 7`（自动匹配 l3_cid=601925） |
 | 「我们品牌和排名相近品牌对比」 | 品牌对比/竞品/排名相近 | `analyze-product --brand 品牌名 --nearby 5` |
 | 「区分价格带」 | 价格带/价位/价格段 | 内置 `TIERS` |
 | 「这些商品ROI怎么样」「GMV除以广告费」 | 商品ROI/投产/广告消耗 | `product-roi --ids-file products.json --period 28`；关键词搜索用 `product-roi --keyword earbuds --top 10 --period 28` |
@@ -81,7 +84,9 @@
 | 家居/日用 | 居家日用（一级） |
 | 食品/零食 | 食品饮料（一级） |
 
-> 同义词表在 `fastmoss-rpa.mjs` 的 `CATEGORY_ALIASES` 常量里，可随时增补。
+> 同义词表在 `scripts/rpa/lib/categories.mjs` 的 `CATEGORY_ALIASES` 常量里，可随时增补。
+>
+> **三级分类**：`categories` 命令已从 `/api/live/filterInfo` 抓全三级树（30 一级 + 247 二级 + 2370 三级，含 ID），和一二级一样自动匹配。`--category 手机壳` → 保护壳、屏幕保护膜、皮肤（l3=601925）；`--category 移动电源` → 910728；也可显式 `--category-id3 601925`。
 
 ## 通用执行流程（AI 拆解大白话后照此走）
 

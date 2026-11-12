@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BASE, SKILL_ROOT, resolveCountry } from '../lib/config.mjs';
 import { log } from '../lib/cli.mjs';
-import { openBrowser, assertLoggedIn, switchCountry } from '../lib/browser.mjs';
+import { openBrowser, assertLoggedIn, switchCountry, assertPageAccess } from '../lib/browser.mjs';
 import { resolveShopId } from '../lib/shop.mjs';
 import { makeTracker, waitTracked } from '../lib/tracker.mjs';
 import { cell, money } from '../lib/report.mjs';
@@ -13,7 +13,7 @@ const SHOP_SEARCH = `${BASE}/shop-marketing/search`;
 const SHOP_DETAIL = `${BASE}/shop-marketing/detail`;
 
 /** 从 author 接口响应收集达人 */
-function collectAuthors(body, out) {
+export function collectAuthors(body, out) {
   const j = JSON.parse(body);
   const list = j.data?.list || [];
   for (const a of list) {
@@ -58,7 +58,7 @@ export async function cmdShopAuthors(opts) {
   // 打开详情页，监听 author 接口（页面自然发出，带签名）
   const authorTracker = makeTracker(page, '/api/shop/v3/author');
   await page.goto(`${SHOP_DETAIL}/${resolvedId}`, { waitUntil: 'domcontentloaded' });
-  const firstBody = await waitTracked(authorTracker, (v) => { try { return Array.isArray(JSON.parse(v)?.data?.list); } catch { return false; } }, { timeout: 15000 });
+  const firstBody = await waitTracked(authorTracker, (v) => { try { return Array.isArray(JSON.parse(v)?.data?.list); } catch { return false; } }, { timeout: 15000, check: () => assertPageAccess(page) });
   if (!firstBody) { authorTracker.dispose(); throw new Error('未拿到店铺达人数据'); }
 
   const authors = [];
@@ -68,20 +68,29 @@ export async function cmdShopAuthors(opts) {
 
   // 翻页拿更多（author 每页 5 个），点到前 top 或翻不动为止
   const pagesNeeded = Math.ceil(top / 5);
-  for (let p = 2; p <= pagesNeeded && authors.length < top; p++) {
-    authorTracker.reset();
-    const clicked = await page.evaluate((n) => {
-      const items = [...document.querySelectorAll('li.ant-pagination-item, li[class*="pagination-item"]')].filter((li) => (li.innerText || '').trim() === String(n));
-      if (!items.length) return false;
-      (items[items.length - 1].querySelector('a') || items[items.length - 1]).click();
-      return true;
-    }, p).catch(() => false);
-    if (!clicked) { log(`第 ${p} 页翻页按钮未找到，停止（已拿 ${authors.length} 个）`); break; }
-    const body = await waitTracked(authorTracker, (v) => { try { return Array.isArray(JSON.parse(v)?.data?.list); } catch { return false; } }, { timeout: 10000 });
-    if (!body) { log(`第 ${p} 页未返回数据，停止`); break; }
-    collectAuthors(body, authors);
-  }
-  authorTracker.dispose();
+  let stopped = null;
+  try {
+    for (let p = 2; p <= pagesNeeded && authors.length < top; p++) {
+      const previousUrl = new URL(authorTracker.url());
+      const params = {};
+      for (const key of ['id', 'shop_id']) if (previousUrl.searchParams.has(key)) params[key] = previousUrl.searchParams.get(key);
+      if (previousUrl.searchParams.has('page')) params.page = Number(previousUrl.searchParams.get('page')) + 1;
+      authorTracker.reset(params);
+      const clicked = await page.evaluate((n) => {
+        const items = [...document.querySelectorAll('li.ant-pagination-item, li[class*="pagination-item"]')].filter((li) => (li.innerText || '').trim() === String(n));
+        if (!items.length) return false;
+        (items[items.length - 1].querySelector('a') || items[items.length - 1]).click();
+        return true;
+      }, p).catch(() => false);
+      if (!clicked) { log(`第 ${p} 页翻页按钮未找到，停止（已拿 ${authors.length} 个）`); break; }
+      const body = await waitTracked(authorTracker, (v) => { try { return Array.isArray(JSON.parse(v)?.data?.list); } catch { return false; } }, { timeout: 10000, check: () => assertPageAccess(page) });
+      if (!body) { log(`第 ${p} 页未返回数据，停止`); break; }
+      collectAuthors(body, authors);
+    }
+  } catch (error) {
+    if (error.code !== 'FASTMOSS_BLOCKED') throw error;
+    stopped = error;
+  } finally { authorTracker.dispose(); }
 
   // 去重（可能翻页重叠）+ 按贡献 GMV 排序 + 取前 top
   const byUid = new Map();
@@ -97,6 +106,8 @@ export async function cmdShopAuthors(opts) {
     total_authors: total ?? null,
     collected: list.length,
     authors: list,
+    status: stopped ? 'blocked' : list.length < Math.min(top, total ?? top) ? 'partial' : 'complete',
+    stopped_reason: stopped?.message || null,
     timings: { launchMs, totalMs: Date.now() - t0 },
   };
 
@@ -105,11 +116,12 @@ export async function cmdShopAuthors(opts) {
   fs.writeFileSync(reportFile, renderShopAuthorsReport(result), 'utf8');
   log(`写出 ${outFile} / ${reportFile}`);
   await context.close();
+  if (stopped) throw stopped;
   return { result, outFile, reportFile };
 }
 
 /** 生成达人清单报告（数据驱动） */
-function renderShopAuthorsReport(r) {
+export function renderShopAuthorsReport(r) {
   const moneyOf = (n) => money(n, r.currency);
   const lines = [
     `# ${r.shop_name || r.shop_id} 带货达人清单（按贡献 GMV 排序）`,
@@ -125,6 +137,7 @@ function renderShopAuthorsReport(r) {
     const fans = a.follower_count != null ? (a.follower_count >= 10000 ? (a.follower_count / 10000).toFixed(2) + '万' : a.follower_count) : '—';
     lines.push(`| ${i + 1} | ${cell(a.nickname)} | ${fans} | ${moneyOf(a.sale_amount)} | ${cell(a.sold_count)} | ${cell(a.product_count)} | ${gpm} | ${liveGpm} | [FastMoss](${a.fastmoss_url}) |`);
   });
+  lines.push('', `状态：${r.status}。${r.stopped_reason ? '采集停止：' + cell(r.stopped_reason) : ''}`);
   lines.push('', '---', '', '*达人 GMV/销量为该店铺内的贡献口径（非达人全平台）；GPM 为视频/直播千次播放销售额区间；数据可追溯至 JSON 产物。*');
   return lines.join('\n');
 }

@@ -9,7 +9,7 @@
  *    “首行ID变化 + 连续两次不变”要多等 800~1000ms，纯属等空气。
  * 3. 列表分页默认 6 路并发，详情默认串行，一个 Node 进程跑完整个抓取，
  *    不再让 agent 一步步点。
- * 4. 只读页面 DOM（含 href），不调用 FastMoss 后端接口、不导出 Cookie。
+ * 4. 操作页面DOM并读取页面自然返回的数据；不主动调用 FastMoss 接口，不导出Cookie。
  *
  * 代码结构：本文件只做入口与命令分发；共享基础设施在 lib/，各业务命令在 commands/。
  *
@@ -22,6 +22,13 @@
  * 商品销售榜（品类大盘 / 品牌对比 / 价格带分析）：
  *   node scripts/rpa/fastmoss-rpa.mjs product --country 泰国 --category 跑步鞋 --days 14 --sort gmv --pages 10 --out products.json
  *     --days 1/7/14/30 映射到 date_type（1日榜/2周榜/3月榜）；--category 为细分品类名（须与页面分类匹配，走 URL 参数）；--sort gmv 按销售额排序
+ *     --date-value 显式指定历史日期/月份，必须与页面有效值一致；未传时探测平台默认日期。
+ *
+ * 新品榜（近期上架商品，固定三日销量口径）：
+ *   node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category-id 16 --category-id2 909064 --pages 20 --out newproducts.json
+ *     --category-id/--category-id2 分类筛选（l1/l2 URL 参数）；--category 大白话分类名自动匹配 ID
+ *     列：排名/商品(含售价+上架时间)/店铺/分类/佣金/三日销量/三日销售额/总销量/总销售额；无 date_type、无销量环比
+ *     → 近7天销量/趋势需进详情页「数据总览」点「近7天」补抓（见 analyze-phonecase-trend.mjs）
  *
  * 商品投流 ROI（逐个进入商品详情 → 投流分析）：
  *   node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --keyword earbuds --top 10 --period 28 --out outputs/roi/product-roi.json
@@ -29,7 +36,7 @@
  *     ROI = 同一商品、同一周期的投流分析销售额 / 广告消耗；支持近7/28/90天，保留平台ROAS供核对。
  *
  * 品类 ROI 一条龙（榜单 → 过滤目标品类前N → 逐个投流ROI → 优势报告，改变量即可复用）：
- *   node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 909320 --category 耳机 --top 10 --days 7 --pages 6 --period 28 --headed true --out outputs/xxx/耳机前10ROI.json
+ *   node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 909320 --category 耳机 --top 10 --days 7 --pages 6 --period 28 --out outputs/xxx/耳机前10ROI.json
  *     --category-id / --category-id2：榜单层级筛选（耳机等细分品类建议用 --category-id2 限定到「影音设备」等二级）
  *     --category：目标品类关键词（榜内按 category 字段 + 商品名过滤）；能命中分类树时自动用作榜单筛选
  *     --top 前N、--days 榜单周期(1/7/14/30)、--pages 抓几页榜、--period ROI周期(7/28/90)、--sort 排序(默认gmv)
@@ -49,10 +56,12 @@
  *
  * 店铺趋势涨跌（近N天 vs 上个N天 + 商品归因，店铺名/国家/天数均为变量）：
  *   node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop Steapex --country 泰国 --days 30 --out xxx.json
+ *     --days 1..45；--pages 商品页数上限（默认100）；日期或覆盖不完整时显示未知/partial。
  *     → 产出 JSON + 同名 .md（店铺整体涨跌 + 拖后腿/领涨商品归因）
  *
  * 店铺对比（某类目 GMV 前 N 店铺逐个对比 GMV/价格/佣金/达人，条件全变量）：
  *   node scripts/rpa/fastmoss-rpa.mjs shop-compare --country 泰国 --category 运动鞋 --top 10 --days 30 --benchmark Steapex --out xxx.json
+ *     默认不设价格门槛、不排除配件；可显式 --min-price 50 --exclude-keywords 鞋垫,鞋带,insole。
  *     → 产出 JSON + 同名 .md（前N店铺对比表 + 达人数量）
  *
  * 店铺达人挖取（从竞品店铺挖带货达人清单，按贡献GMV排序）：
@@ -88,6 +97,8 @@ import { parseArgs } from './lib/cli.mjs';
 import { activeContexts } from './lib/browser.mjs';
 import { cmdSearch, cmdDetail, cmdPipeline } from './commands/influencer.mjs';
 import { cmdProduct, cmdProductRoi, cmdCategoryRoi } from './commands/product.mjs';
+import { cmdNewProducts } from './commands/new-products.mjs';
+import { cmdHotVideo } from './commands/hot-video.mjs';
 import { cmdShop, cmdShopDetail, cmdShopDetailReport } from './commands/shop.mjs';
 import { cmdShopTrend } from './commands/shop-trend.mjs';
 import { cmdShopCompare } from './commands/shop-compare.mjs';
@@ -108,6 +119,8 @@ export const HANDLERS = {
   product: cmdProduct,
   'product-roi': cmdProductRoi,
   'category-roi': cmdCategoryRoi,
+  'new-products': cmdNewProducts,
+  'hot-video': cmdHotVideo,
   shop: cmdShop,
   'shop-detail': cmdShopDetail,
   'shop-detail-report': cmdShopDetailReport,
@@ -125,15 +138,15 @@ export const HANDLERS = {
 /** 全部命令名（HANDLERS 的 key 是唯一权威来源，run-background / 测试都从这里取，避免重复维护清单） */
 export const COMMAND_NAMES = Object.keys(HANDLERS);
 
-const main = async () => {
-  const opts = parseArgs(process.argv.slice(2));
+export const main = async (argv = process.argv.slice(2)) => {
+  const opts = parseArgs(argv);
   try {
     if (!opts.cmd || opts.cmd === 'help') {
       console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('*/')[0]);
       return;
     }
+    if (!Object.hasOwn(HANDLERS, opts.cmd)) throw new Error('未知命令：' + opts.cmd);
     const handler = HANDLERS[opts.cmd];
-    if (!handler) throw new Error('未知命令：' + opts.cmd);
     return await handler(opts);
   } finally {
     // 无论命令成败，统一关闭所有存活的浏览器上下文，避免资源泄漏
@@ -142,7 +155,7 @@ const main = async () => {
 };
 
 // 只在直接运行时执行 main（被 import 时不执行，供 run-background / 测试复用 HANDLERS 而不会误跑命令）
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     console.error('RPA 失败：', e.message);
     process.exit(1);

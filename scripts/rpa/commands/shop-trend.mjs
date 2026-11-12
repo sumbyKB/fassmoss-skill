@@ -1,237 +1,180 @@
-// 店铺趋势命令：近N天 vs 上个N天涨跌对比 + 商品级归因。
-// 数据源：店铺级 /api/shop/v3/recentData（date_type=90 拿 90 天逐日），商品级 /api/goods/v3/overview（d_type=90）。
-// 接口有 MSG_SAFE_0001 签名，只能通过「页面正常操作(点击近90天) + 监听响应」拿数据，不能直接 fetch。
+// 店铺趋势：两个完整等长周期的逐日对比，以及已采集商品的涨跌归因。
 import fs from 'node:fs';
 import path from 'node:path';
-import { BASE, SKILL_ROOT, resolveCountry } from '../lib/config.mjs';
+import { BASE, SKILL_ROOT, COUNTRY_LABELS, resolveCountry } from '../lib/config.mjs';
 import { log } from '../lib/cli.mjs';
-import { openBrowser, safeEval, assertLoggedIn, switchCountry, enableImages } from '../lib/browser.mjs';
+import { openBrowser, safeEval, assertLoggedIn, switchCountry, assertPageAccess } from '../lib/browser.mjs';
 import { makeTracker, waitTracked } from '../lib/tracker.mjs';
-import { resolveShopId, grabShopOverview } from '../lib/shop.mjs';
+import { resolveShopId, grabShopOverview, collectShopProducts } from '../lib/shop.mjs';
+import { comparePeriod, validateCompareDays } from '../lib/trend.mjs';
+import { parseAmount } from '../data-rules.mjs';
 import { cell, short, pct, money } from '../lib/report.mjs';
 
 const SHOP_SEARCH = `${BASE}/shop-marketing/search`;
 const SHOP_DETAIL = `${BASE}/shop-marketing/detail`;
 const GOODS_DETAIL = `${BASE}/e-commerce/detail`;
 
-/** 点击文本匹配的周期按钮（如「近90天」）。用 playwright 真实点击（antd radio 需完整鼠标事件序列）。 */
-async function clickLeaf(page, text) {
-  try {
-    const btn = page.locator(`text="${text}"`).first();
-    if (await btn.count() > 0) { await btn.click(); return true; }
-  } catch (e) { /* 点击失败，返回 false */ }
-  return false;
-}
-
-/** 检测是否出现腾讯验证码（遮罩层或风控提示） */
-async function detectCaptcha(page) {
-  return await page.evaluate(() => {
-    return !!document.querySelector('#tCaptchaMaskLayer') || /正在保护|进一步确认|请求 ID/.test(document.body.innerText || '');
-  }).catch(() => false);
-}
-
-/** 点击周期按钮并等待目标响应；若触发验证码，放行图片并等待人工完成后重试。 */
-async function clickPeriodAndWait(page, context, tracker, text, condition, timeout = 15000) {
-  await clickLeaf(page, text);
-  let body = await waitTracked(tracker, condition, { timeout });
-  if (body) return body;
-  if (await detectCaptcha(page)) {
-    enableImages(context); // 放行图片，让验证码可见
-    log('触发访问验证，已放行图片，请在浏览器里完成验证（最多等待 120 秒）…');
-    for (let i = 0; i < 120; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      if (!(await detectCaptcha(page))) break;
-    }
-    await clickLeaf(page, text);
-    body = await waitTracked(tracker, condition, { timeout });
+/** 等本次90天请求，验证阻挡直接交给人工登录流程，不在后台空等。 */
+export async function readNinetyDayTrend(page, tracker, params, readRows) {
+  await assertPageAccess(page);
+  const currentUrl = tracker.url() ? new URL(tracker.url()) : null;
+  const correctPeriod = currentUrl && Object.entries(params).every(([key, value]) => currentUrl.searchParams.get(key) === String(value));
+  if (!correctPeriod) {
+    tracker.reset(params);
+    await page.getByRole('radio', { name: '近90天', exact: true }).first().check();
   }
-  return body;
+  const body = await waitTracked(tracker, value => {
+    try { return Array.isArray(readRows(JSON.parse(value))); } catch { return false; }
+  }, { check: () => assertPageAccess(page) });
+  if (!body) throw new Error('未拿到目标对象的近90天趋势数据');
+  return JSON.parse(body);
 }
 
-/** 从逐日趋势数组计算近N天 / 上个N天的增量销量与销售额 */
-function comparePeriod(trend, days) {
-  const inc = (d, k) => Number(d[k]) || 0;
-  const last = trend.slice(-days).reduce((s, d) => ({ sold: s.sold + inc(d, 'inc_sold_count'), amount: s.amount + inc(d, 'inc_sale_amount') }), { sold: 0, amount: 0 });
-  const prev = trend.slice(-2 * days, -days).reduce((s, d) => ({ sold: s.sold + inc(d, 'inc_sold_count'), amount: s.amount + inc(d, 'inc_sale_amount') }), { sold: 0, amount: 0 });
-  const pct = (cur, pre) => (pre > 0 ? ((cur - pre) / pre) * 100 : null);
+function attribution(products) {
+  const compared = products.filter(p => p.cmp?.complete && p.cmp.sold_pct !== null);
+  const item = p => ({ id: p.id, title: p.title, price: p.price, crate: p.crate, fastmoss_url: p.fastmoss_url, sold_pct: p.cmp.sold_pct, amount_pct: p.cmp.amount_pct, cur_sold: p.cmp.cur.sold, prev_sold: p.cmp.prev.sold, cur_amount: p.cmp.cur.amount, prev_amount: p.cmp.prev.amount });
   return {
-    cur: last, prev,
-    sold_pct: pct(last.sold, prev.sold),
-    amount_pct: pct(last.amount, prev.amount),
-    trend_days: trend.length,
-    first_date: trend[0]?.dt, last_date: trend[trend.length - 1]?.dt,
+    risers: compared.filter(p => p.cmp.sold_pct > 0).sort((a, b) => b.cmp.sold_pct - a.cmp.sold_pct).map(item),
+    decliners: compared.filter(p => p.cmp.sold_pct < 0).sort((a, b) => a.cmp.sold_pct - b.cmp.sold_pct).map(item),
   };
 }
 
-/** shop-trend：近N天 vs 上个N天涨跌 + 商品归因。店铺名/国家/天数均为变量。 */
 export async function cmdShopTrend(opts) {
-  const days = Math.max(1, Number(opts.days || 30));
+  const days = validateCompareDays(opts.days ?? 30);
+  const maxPages = Number(opts.pages ?? 100);
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('--pages 必须为正整数');
   const shopName = opts.shop || opts['shop-name'] || (Array.isArray(opts._) ? opts._[0] : null);
   const shopId = opts['shop-id'] || opts.id || null;
-  if (!shopName && !shopId) throw new Error('缺少店铺名或 ID：node scripts/rpa/fastmoss-rpa.mjs shop-trend --shop <店铺名> [--country 泰国] [--days 30]');
+  if (!shopName && !shopId) throw new Error('缺少店铺名或ID：shop-trend --shop <店铺名> 或 --shop-id <ID>');
   const outFile = path.resolve(opts.out || path.join(SKILL_ROOT, 'outputs', `shop-trend-${(shopName || shopId).replace(/[^\w.-]/g, '_')}-${Date.now()}.json`));
   if (!outFile.toLowerCase().endsWith('.json')) throw new Error('--out 请使用 .json 文件名');
   const reportFile = outFile.slice(0, -5) + '.md';
   const t0 = Date.now();
-
   const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
-  await assertLoggedIn(context.pages()[0], SHOP_SEARCH);
-  const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
-  const currency = country ? resolveCountry(country).currency : (opts.currency || 'THB');
   const page = context.pages()[0];
-
-  const resolvedId = shopId || (await resolveShopId(page, shopName));
-
-  // === 店铺级趋势 ===
-  const recentTracker = makeTracker(page, '/api/shop/v3/recentData');
-  await page.goto(`${SHOP_DETAIL}/${resolvedId}`, { waitUntil: 'domcontentloaded' });
-  // 页面默认加载近28天；等默认数据后再抓总览（此时 overview 8 项已渲染）
-  await waitTracked(recentTracker, (v) => { try { return JSON.parse(v)?.data?.list?.trend?.length > 0; } catch { return false; } });
-  await page.waitForTimeout(1500);
-  // 抓总览 8 项（含「分类排名」= 运动鞋类目排名）
-  const shopOverview = await grabShopOverview(page);
-  recentTracker.reset();
-  const recentBody = await clickPeriodAndWait(page, context, recentTracker, '近90天', (v) => { try { return JSON.parse(v)?.data?.list?.trend?.length > 28; } catch { return false; } });
-  if (!recentBody) {
-    const latest = recentTracker.get();
-    let latestLen = null;
-    try { latestLen = JSON.parse(latest)?.data?.list?.trend?.length ?? null; } catch { latestLen = null; }
-    recentTracker.dispose();
-    throw new Error(`未拿到店铺近90天趋势数据（最近一次 trend 长度=${latestLen ?? '未捕获'}）`);
-  }
-  recentTracker.dispose();
-  const recentJson = JSON.parse(recentBody);
-  const shopTrend = recentJson.data.list.trend;
-  const shopCmp = comparePeriod(shopTrend, days);
-  // 用接口返回的真实店铺名（total_info.shop_name），比搜索词或 ID 更准确
-  const resolvedShopName = recentJson.data.list.total_info?.shop_name || shopName || resolvedId;
-
-  // === 商品列表 ===
-  const goodsTracker = makeTracker(page, '/api/shop/v3/goods');
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  const goodsBody = await waitTracked(goodsTracker, (v) => { try { return Array.isArray(JSON.parse(v)?.data?.product_list); } catch { return false; } });
-  if (!goodsBody) throw new Error('未拿到店铺商品列表');
-  const productList = (JSON.parse(goodsBody).data.product_list || []).filter((p) => (Number(p.sold_count) || 0) > 0);
-  log(`店铺趋势 OK（${shopTrend.length} 天），有动销商品 ${productList.length} 个，开始逐个抓商品趋势`);
-
-  // === 商品级趋势（逐个进商品详情，点近90天拿 overview 的 chart_list）===
-  const products = [];
-  const goodsTracker2 = makeTracker(page, '/api/goods/v3/overview');
-  for (const p of productList) {
-    const pid = String(p.product_id || p.id);
-    try {
-      goodsTracker2.reset(); // 先重置，避免上一个商品的残留数据被误判为当前商品
-      await page.goto(`${GOODS_DETAIL}/${pid}`, { waitUntil: 'domcontentloaded' });
-      // 等当前商品默认 overview（28天）发出
-      const def = await waitTracked(goodsTracker2, (v) => { try { return JSON.parse(v)?.data?.chart_list?.length > 0; } catch { return false; } }, { timeout: 12000 });
-      if (!def) throw new Error('默认 overview 未加载');
-      goodsTracker2.reset();
-      const ovBody = await clickPeriodAndWait(page, context, goodsTracker2, '近90天', (v) => { try { return JSON.parse(v)?.data?.chart_list?.length > 28; } catch { return false; } }, 12000);
-      const chart = ovBody ? JSON.parse(ovBody).data.chart_list : null;
-      const cmp = chart ? comparePeriod(chart, days) : null;
-      products.push({
-        id: pid,
-        title: p.title,
-        price: p.price,
-        ori_price: p.ori_price,
-        crate: p.crate,
-        ctime: p.ctime,
-        category_l2: (p.category_name_l2 || []).join('/'),
-        product_rating: p.product_rating,
-        relate_author_count: p.relate_author_count,
-        tiktok_url: p.detail_url,
-        fastmoss_url: `${GOODS_DETAIL}/${pid}`,
-        sold_28d: Number(p.sold_count) || 0,
-        amount_28d: Number(p.sale_amount) || 0,
-        cmp,
-      });
-      const trendStr = cmp ? `近${days}天销量${cmp.cur.sold} vs 上个${days}天${cmp.prev.sold} → ${cmp.sold_pct == null ? '—' : (cmp.sold_pct >= 0 ? '涨' : '跌') + Math.abs(cmp.sold_pct).toFixed(1) + '%'}` : '无趋势数据';
-      log(`商品 ${pid} ${(p.title || '').slice(0, 20)}：${trendStr}`);
-    } catch (e) {
-      products.push({ id: pid, title: p.title, price: p.price, crate: p.crate, sold_28d: Number(p.sold_count) || 0, amount_28d: Number(p.sale_amount) || 0, fastmoss_url: `${GOODS_DETAIL}/${pid}`, cmp: null, error: String(e).slice(0, 100) });
-      log(`商品 ${pid} 抓取失败：${String(e).slice(0, 80)}`);
-    }
-  }
-  goodsTracker2.dispose();
-
-  // === 归因：按商品涨跌幅度排序，找拖后腿 vs 领涨 ===
-  const withCmp = products.filter((p) => p.cmp && p.cmp.sold_pct != null);
-  withCmp.sort((a, b) => b.cmp.sold_pct - a.cmp.sold_pct);
-  const risers = withCmp.filter((p) => p.cmp.sold_pct > 0);
-  const decliners = withCmp.filter((p) => p.cmp.sold_pct < 0);
-  const attrItem = (p) => ({ id: p.id, title: p.title, price: p.price, crate: p.crate, fastmoss_url: p.fastmoss_url, sold_pct: p.cmp.sold_pct, amount_pct: p.cmp.amount_pct, cur_sold: p.cmp.cur.sold, prev_sold: p.cmp.prev.sold, cur_amount: p.cmp.cur.amount, prev_amount: p.cmp.prev.amount });
-
-  const result = {
-    collected_at: new Date().toISOString(),
-    shop_name: resolvedShopName,
-    shop_id: resolvedId,
-    country: country || null,
-    currency,
-    compare_days: days,
-    overview: shopOverview,
-    shop: shopCmp,
-    products,
-    attribution: {
-      risers: risers.map(attrItem),
-      decliners: decliners.map(attrItem),
-    },
-    timings: { launchMs, totalMs: Date.now() - t0 },
+  const result = { collected_at: new Date().toISOString(), status: 'running', shop_name: shopName, shop_id: shopId, country: null, currency: null, compare_days: days, overview: {}, shop: null, products: [], coverage: { scope: 'page_visible_products', historical_coverage_complete: false }, attribution: { risers: [], decliners: [] } };
+  const trackers = [];
+  const save = () => {
+    result.attribution = attribution(result.products);
+    result.coverage.products_requested = result.products.length;
+    result.coverage.products_compared = result.products.filter(p => p.cmp?.complete).length;
+    const emptyDespiteSales = result.products.length === 0 && result.shop?.complete && (result.shop.cur.sold !== 0 || result.shop.prev.sold !== 0);
+    result.coverage.comparison_complete = !emptyDespiteSales && result.shop?.complete === true && result.coverage.historical_coverage_complete === true && result.coverage.products_compared === result.products.length;
+    result.timings = { launchMs, totalMs: Date.now() - t0 };
+    fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    fs.writeFileSync(outFile, JSON.stringify(result, null, 2), 'utf8');
+    fs.writeFileSync(reportFile, renderShopTrendReport(result), 'utf8');
   };
+  save();
+  try {
+    await assertLoggedIn(page, SHOP_SEARCH);
+    const country = opts.country ? await switchCountry(page, opts.country) : await safeEval(page, labels => [...document.querySelectorAll('button')].map(e => e.innerText.trim()).find(text => labels.includes(text)) || null, COUNTRY_LABELS);
+    if (!country) throw new Error('无法确认当前站点，请显式传 --country');
+    result.country = country;
+    result.currency = resolveCountry(country).currency;
+    const resolvedId = shopId || await resolveShopId(page, shopName);
+    result.shop_id = resolvedId;
+    const recent = makeTracker(page, '/api/shop/v3/recentData', { id: resolvedId });
+    const goods = makeTracker(page, '/api/shop/v3/goods');
+    trackers.push(recent, goods);
+    await page.goto(`${SHOP_DETAIL}/${resolvedId}`, { waitUntil: 'domcontentloaded' });
+    const initial = await waitTracked(recent, value => { try { return Array.isArray(JSON.parse(value)?.data?.list?.trend); } catch { return false; } }, { check: () => assertPageAccess(page) });
+    if (!initial) throw new Error('店铺趋势未加载');
+    result.overview = await grabShopOverview(page);
+    const shopData = await readNinetyDayTrend(page, recent, { id: resolvedId, date_type: 90 }, json => json?.data?.list?.trend);
+    result.shop_name = shopData.data.list.total_info?.shop_name || shopName || resolvedId;
+    result.shop = comparePeriod(shopData.data.list.trend, days);
+    save();
 
-  fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  fs.writeFileSync(outFile, JSON.stringify(result, null, 2), 'utf8');
-  fs.writeFileSync(reportFile, renderShopTrendReport(result), 'utf8');
-  log(`写出 ${outFile} / ${reportFile}`);
-  await context.close();
-  return { result, outFile, reportFile };
+    // 从首次导航起就监听商品列表，避免为重新捕获接口而整页重载。
+    await page.evaluate(() => [...document.querySelectorAll('table')].find(t => t.querySelector('a[href*="/e-commerce/detail/"]'))?.scrollIntoView());
+    const listing = await collectShopProducts(page, goods, { maxPages });
+    result.coverage = { ...result.coverage, ...listing.coverage };
+    result.products = listing.products.map(p => ({
+      id: p.product_id, title: p.title, price: p.price, ori_price: p.ori_price, crate: p.crate,
+      ctime: p.ctime, category_l2: Array.isArray(p.category_name_l2) ? p.category_name_l2.join('/') : p.category_name_l2 || null,
+      product_rating: p.product_rating, relate_author_count: p.relate_author_count, tiktok_url: p.detail_url,
+      fastmoss_url: `${GOODS_DETAIL}/${p.product_id}`,
+      listing_period_days: listing.coverage.period_days, listed_units: parseAmount(p.sold_count), listed_gmv: parseAmount(p.sale_amount),
+      sold_28d: listing.coverage.period_days === 28 ? parseAmount(p.sold_count) : null,
+      amount_28d: listing.coverage.period_days === 28 ? parseAmount(p.sale_amount) : null,
+      status: 'not_attempted', cmp: null,
+    }));
+    save();
+    const overview = makeTracker(page, '/api/goods/v3/overview');
+    trackers.push(overview);
+    for (const product of result.products) {
+      try {
+        overview.reset({ product_id: product.id });
+        await page.goto(product.fastmoss_url, { waitUntil: 'domcontentloaded' });
+        const first = await waitTracked(overview, value => { try { return Array.isArray(JSON.parse(value)?.data?.chart_list); } catch { return false; } }, { check: () => assertPageAccess(page) });
+        if (!first) throw new Error('商品趋势未加载');
+        const data = await readNinetyDayTrend(page, overview, { product_id: product.id, d_type: 90 }, json => json?.data?.chart_list);
+        product.cmp = comparePeriod(data.data.chart_list, days, result.shop.comparison_end);
+        product.status = product.cmp.complete ? 'ok' : 'incomplete';
+        if (!product.cmp.complete) product.error = product.cmp.reason;
+      } catch (error) {
+        product.status = error.code === 'FASTMOSS_BLOCKED' ? 'blocked' : 'error';
+        product.error = error.message;
+        if (error.code === 'FASTMOSS_BLOCKED') throw error;
+      } finally { save(); }
+      log(`商品趋势 ${product.id}：${product.status}`);
+    }
+    result.status = result.coverage.comparison_complete ? 'complete' : 'partial';
+    save();
+    return { result, outFile, reportFile };
+  } catch (error) {
+    result.status = error.code === 'FASTMOSS_BLOCKED' ? 'blocked' : 'failed';
+    result.stopped_reason = error.message;
+    save();
+    throw error;
+  } finally {
+    trackers.forEach(tracker => tracker.dispose());
+    await context.close();
+  }
 }
 
-/** 生成店铺趋势报告（数据驱动，不硬编码） */
-function renderShopTrendReport(r) {
+export function renderShopTrendReport(r) {
   const s = r.shop;
   const ov = r.overview || {};
-  const moneyOf = (n) => money(n, r.currency);
+  const moneyOf = value => money(value, r.currency);
   const lines = [
-    `# ${r.shop_name || r.shop_id} 店铺趋势分析（近${r.compare_days}天 vs 上个${r.compare_days}天）`,
-    '',
-    `> 采集 ${(r.collected_at || '').slice(0, 10)} · 国家 ${r.country || '未知'} · 币种 ${r.currency} · 趋势区间 ${s.first_date} ~ ${s.last_date}（${s.trend_days} 天逐日）`,
-    '',
-    '## 一、店铺总览（累计口径）',
-    '',
-    '| 指标 | 数值 | 指标 | 数值 |',
-    '|---|---|---|---|',
+    `# ${r.shop_name || r.shop_id || '店铺'} 趋势分析（近${r.compare_days}天 vs 上个${r.compare_days}天）`, '',
+    `国家：${r.country || '未知'} · 币种：${r.currency || '未知'} · 状态：${r.status}`, '',
+    '## 一、店铺总览（累计口径）', '',
+    '| 指标 | 数值 | 指标 | 数值 |', '|---|---|---|---|',
     `| 总销量 | ${cell(ov['总销量'])} | 总销售额 | ${cell(ov['总销售额'])} |`,
     `| 在售商品数 | ${cell(ov['在售商品数'])} | 全国排名 | ${cell(ov['全国排名'])} |`,
     `| 带货直播数 | ${cell(ov['带货直播数'])} | 带货视频数 | ${cell(ov['带货视频数'])} |`,
-    `| 带货达人数 | ${cell(ov['带货达人数'])} | **分类排名** | **${cell(ov['分类排名'])}** |`,
-    '',
-    `## 二、近${r.compare_days}天 vs 上个${r.compare_days}天`,
-    '',
-    '| 指标 | 近' + r.compare_days + '天 | 上个' + r.compare_days + '天 | 环比 |',
-    '|---|---|---|---|',
-    `| 销量 | ${cell(s.cur.sold)} | ${cell(s.prev.sold)} | ${pct(s.sold_pct)} |`,
-    `| GMV | ${moneyOf(s.cur.amount)} | ${moneyOf(s.prev.amount)} | ${pct(s.amount_pct)} |`,
-    '',
+    `| 带货达人数 | ${cell(ov['带货达人数'])} | 分类排名 | ${cell(ov['分类排名'])} |`, '',
+    '## 二、周期对比', '',
   ];
-  const over = s.amount_pct == null ? '未知' : s.amount_pct >= 0 ? '上涨' : '下跌';
-  lines.push(`**结论：整体 GMV ${over}**（${pct(s.amount_pct)}），销量 ${pct(s.sold_pct)}。`);
-  lines.push('');
-
-  const goodsTable = (title, arr) => {
-    const out = [`### ${title}`, '', '| 商品 | 价格 | 佣金 | 近' + r.compare_days + '天销量 | 上个' + r.compare_days + '天 | 销量环比 | 近' + r.compare_days + '天GMV | 上个' + r.compare_days + '天 | GMV环比 | 链接 |', '|---|---|---|---|---|---|---|---|---|---|'];
-    for (const p of arr) {
-      const link = p.fastmoss_url ? `[FastMoss](${p.fastmoss_url})` : '—';
-      out.push(`| ${cell(short(p.title))} | ${cell(p.price)} | ${cell(p.crate)} | ${cell(p.cur_sold)} | ${cell(p.prev_sold)} | ${pct(p.sold_pct)} | ${moneyOf(p.cur_amount)} | ${moneyOf(p.prev_amount)} | ${pct(p.amount_pct)} | ${link} |`);
-    }
-    out.push('');
-    return out.join('\n');
+  if (s?.complete) {
+    lines.push(`上期：${s.previous_start}～${s.previous_end}；本期：${s.current_start}～${s.current_end}。`, '',
+      '| 指标 | 本期 | 上期 | 环比 |', '|---|---|---|---|',
+      `| 销量 | ${s.cur.sold} | ${s.prev.sold} | ${pct(s.sold_pct)} |`,
+      `| GMV | ${moneyOf(s.cur.amount)} | ${moneyOf(s.prev.amount)} | ${pct(s.amount_pct)} |`, '',
+      '基期为0时百分比保持未知；逐日数据连续、两期等长后才计算环比。', '');
+  } else lines.push(`店铺涨跌未知：${s?.reason || '趋势尚未采集'}。`, '');
+  lines.push('## 三、商品归因与覆盖范围', '',
+    `商品清单：已读 ${r.coverage.pages_read || 0} 页、${r.products.length} 个商品（含当前销量为0的商品）；完成比较 ${r.coverage.products_compared || 0} 个。`,
+    `清单周期：${r.coverage.period_days ? '近' + r.coverage.period_days + '天' : '未确认'}；页面可见历史清单与比较覆盖：${r.coverage.comparison_complete ? '完整' : '部分/未确认'}。`, '');
+  if (!r.coverage.comparison_complete) lines.push('以下仅为已采集样本；页面未覆盖的历史商品或缺失趋势可能影响归因，不能据此认定全店没有下跌商品。', '');
+  if (r.coverage.reason) lines.push(`清单限制：${cell(r.coverage.reason)}。`, '');
+  const table = (title, products) => {
+    lines.push(`### ${title}`, '', '| 商品 | 价格 | 佣金 | 本期销量 | 上期销量 | 销量环比 | 本期GMV | 上期GMV | GMV环比 | 链接 |', '|---|---|---|---|---|---|---|---|---|---|');
+    products.forEach(p => lines.push(`| ${cell(short(p.title))} | ${cell(p.price)} | ${cell(p.crate)} | ${p.cur_sold} | ${p.prev_sold} | ${pct(p.sold_pct)} | ${moneyOf(p.cur_amount)} | ${moneyOf(p.prev_amount)} | ${pct(p.amount_pct)} | [商品](${p.fastmoss_url}) |`));
+    lines.push('');
   };
-
-  lines.push('## 三、商品归因（近' + r.compare_days + '天销量环比）', '');
-  if (r.attribution.decliners.length) lines.push(goodsTable('拖后腿（销量下跌）', r.attribution.decliners));
-  else lines.push('### 拖后腿（销量下跌）', '', '无下跌商品。', '');
-  if (r.attribution.risers.length) lines.push(goodsTable('领涨（销量上涨）', r.attribution.risers));
-
-  lines.push('---', '', '*数据可追溯至 JSON 产物；涨跌基于逐日增量（inc_sold_count/inc_sale_amount）精确求和，非估算；「分类排名」即店铺在该类目（运动鞋）内的排名；商品级趋势缺失时如实标注。*');
+  if (r.attribution.decliners.length) table('销量下跌商品', r.attribution.decliners);
+  else lines.push(r.coverage.comparison_complete ? '完整覆盖的页面可见比较范围内未发现销量下跌商品；这不包含平台未展示的历史商品。' : '当前已采集样本未发现可确认的下跌；全店结论未知。', '');
+  if (r.attribution.risers.length) table('销量上涨商品', r.attribution.risers);
+  const unfinished = r.products.filter(p => p.status !== 'ok');
+  if (unfinished.length) {
+    lines.push('### 未完成项', '', '| 商品 | 状态 | 原因 |', '|---|---|---|');
+    unfinished.forEach(p => lines.push(`| ${cell(p.title || p.id)} | ${cell(p.status)} | ${cell(p.error || '尚未采集')} |`));
+    lines.push('');
+  }
+  if (r.stopped_reason) lines.push(`采集停止：${cell(r.stopped_reason)}。`, '');
   return lines.join('\n');
 }

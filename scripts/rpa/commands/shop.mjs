@@ -7,6 +7,7 @@ import { openBrowser, safeEval, assertLoggedIn, switchCountry } from '../lib/bro
 import { poolWithPage } from '../lib/pool.mjs';
 import { resolveCategoryId } from '../lib/categories.mjs';
 import { analyzeShopDetail } from '../analyze-shop-detail.mjs';
+import { resolveShopId } from '../lib/shop.mjs';
 
 const SHOP_BASE = `${BASE}/shop-marketing/search`;
 
@@ -325,31 +326,8 @@ export async function cmdShopDetail(opts) {
   const currency = country ? resolveCountry(country).currency : (opts.currency || null);
   const page = context.pages()[0];
 
-  let resolvedId = shopId;
-  let detailUrl = null;
-
-  if (!resolvedId) {
-    // 1. 打开店铺搜索页，输入店铺名搜索
-    await page.goto(`${SHOP_BASE}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(5000);
-    const input = await page.waitForSelector('input[placeholder*="店铺"]', { timeout: 15000 }).catch(() => null);
-    if (!input) throw new Error('找不到店铺搜索框，可能未登录或页面结构变化');
-    await input.fill(shopName);
-    await input.press('Enter');
-    await page.waitForTimeout(5000);
-    // 2. 取第一条结果的详情链接
-    const link = await page.waitForSelector('a[href*="/shop-marketing/detail/"]', { timeout: 15000 }).catch(() => null);
-    if (!link) throw new Error(`未找到店铺「${shopName}」的搜索结果`);
-    detailUrl = await link.getAttribute('href');
-    resolvedId = detailUrl.split('/').pop();
-    log(`搜索「${shopName}」命中详情 ${detailUrl}`);
-  } else {
-    // 直接打开详情页
-    detailUrl = `/shop-marketing/detail/${resolvedId}`;
-  }
-
-  // 进入详情页（detailUrl 已含 /zh 前缀或补全；BASE 以 /zh 结尾，避免重复拼接）
-  const fullUrl = detailUrl.startsWith('/zh/') ? `https://www.fastmoss.com${detailUrl}` : `${BASE}${detailUrl}`;
+  const resolvedId = shopId || await resolveShopId(page, shopName);
+  const fullUrl = `${BASE}/shop-marketing/detail/${resolvedId}`;
   await page.goto(fullUrl, { waitUntil: 'domcontentloaded' });
 
   await waitShopDetail(page);

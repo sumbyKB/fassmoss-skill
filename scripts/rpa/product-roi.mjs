@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { parseAmount } from './data-rules.mjs';
+import { assertPageAccess as assertPageAvailable } from './lib/browser.mjs';
+export { pageAccessBlocker as productPageBlocker } from './lib/browser.mjs';
 
 const BASE = 'https://www.fastmoss.com/zh/e-commerce';
 export const PRODUCT_ROI_FORMULA = '投流分析销售额（GMV） / 同周期广告消耗';
@@ -38,20 +40,6 @@ export function productRoiOptions(opts) {
   }
   if (!keyword && !products.size) throw new Error('商品列表为空');
   return { period, keyword: keyword?.trim() ?? null, pages: Number(opts.pages ?? 1), top: Number(opts.top ?? (keyword ? 10 : products.size)), products: [...products.values()] };
-}
-
-// 只检查页面可见的拦截提示，不采集账户信息。
-export function productPageBlocker() {
-  const text = document.body?.innerText ?? '';
-  if (/正在保护|进一步确认|请求 ID/.test(text)) return 'FastMoss 需要人工完成访问验证';
-  if (/功能使用次数已达|已达.*(?:上限|限制)|升级.*(?:解锁|查看完整)/.test(text)) return 'FastMoss 网页次数或权限受限';
-  if (/您当前是游客身份/.test(text) || [...document.querySelectorAll('button')].some(e => /^(登录|登 录|Log in|Sign in)$/.test(e.innerText.trim()))) return 'FastMoss 当前采集窗口未登录';
-  return null;
-}
-
-async function assertPageAvailable(page) {
-  const message = await page.evaluate(productPageBlocker);
-  if (message) { const error = new Error(message); error.code = 'FASTMOSS_BLOCKED'; throw error; }
 }
 
 export async function searchProductRoiCandidates(page, { keyword, pages, top }) {

@@ -9,6 +9,10 @@
 # 任务产物（报告、名单、下载、截图）
 outputs/
 
+# 工具生成物与本地工作记录（不入库）
+graphify-out/
+operations/
+
 # 常见临时文件
 __pycache__/
 *.pyc

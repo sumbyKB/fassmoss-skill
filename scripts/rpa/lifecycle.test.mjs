@@ -2,15 +2,36 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { analyzeShopDetail } from './analyze-shop-detail.mjs';
-import { COMMAND_NAMES } from './fastmoss-rpa.mjs';
+import { COMMAND_NAMES, HANDLERS, main } from './fastmoss-rpa.mjs';
+import { activeContexts } from './lib/browser.mjs';
 
-test('entry registers all commands and closes contexts in finally', () => {
-  // 命令数合理（HANDLERS 是命令清单的唯一权威来源，run-background / 测试都从这里复用，不重复维护）
-  assert.ok(COMMAND_NAMES.length >= 15, `命令数不足：${COMMAND_NAMES.length}`);
-  const source = readFileSync(new URL('./fastmoss-rpa.mjs', import.meta.url), 'utf8');
-  // main 在 finally 里统一关闭所有存活上下文，保证资源不泄漏
-  assert.match(source, /finally\s*\{/);
-  assert.match(source, /activeContexts[^]*?context\.close/);
+test('every command finishes or fails before its browser contexts close', async () => {
+  assert.ok(COMMAND_NAMES.length >= 15);
+  for (const command of COMMAND_NAMES) {
+    const original = HANDLERS[command];
+    for (const fail of [false, true]) {
+      const events = [];
+      let release;
+      const pending = new Promise(resolve => { release = resolve; });
+      const context = { close: async () => { events.push('closed'); activeContexts.delete(context); } };
+      HANDLERS[command] = async () => {
+        activeContexts.add(context);
+        await pending;
+        events.push('finished');
+        if (fail) throw new Error('expected command failure');
+        return 42;
+      };
+      try {
+        const task = main([command]);
+        await Promise.resolve();
+        assert.deepEqual(events, [], command);
+        release();
+        if (fail) await assert.rejects(task, /expected command failure/);
+        else assert.equal(await task, 42);
+        assert.deepEqual(events, ['finished', 'closed'], command);
+      } finally { release(); HANDLERS[command] = original; activeContexts.delete(context); }
+    }
+  }
 });
 
 test('every command module requires an explicit headed opt-in', () => {

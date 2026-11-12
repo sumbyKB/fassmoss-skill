@@ -18,6 +18,15 @@ export function parseAmount(value) {
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
 }
 
+/** 页面售价区间；保留千分位和币种，不把无价格当作0。 */
+export function parsePriceRange(value) {
+  const parts = stripCurrency(value).split(/[-–—~]/);
+  if (parts.length > 2) return null;
+  const values = parts.map(parseAmount);
+  if (values.some(n => n === null || !Number.isFinite(n) || n < 0)) return null;
+  return { min: Math.min(...values), max: Math.max(...values) };
+}
+
 export function findBrandIndex(rows, query, nameOf) {
   const normalize = value => String(value || '').trim().toLowerCase();
   const target = normalize(query);

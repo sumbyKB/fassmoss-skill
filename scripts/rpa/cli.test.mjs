@@ -30,3 +30,16 @@ test('invalid product ROI requests fail before browser launch', () => {
     assert.match(result.stderr, /只支持|请指定一项|不支持自定义日期/);
   }
 });
+
+test('invalid shop comparison periods and price filters fail before browser launch', () => {
+  for (const args of [
+    ['shop-trend', '--shop-id', '123', '--days', '60'],
+    ['shop-trend', '--shop-id', '123', '--days', '1.5'],
+    ['shop-compare', '--category-id2', '123', '--min-price', 'abc'],
+  ]) {
+    const result = run(args);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /1到45|非负金额/);
+    assert.doesNotMatch(result.stderr, /playwright|browserType|launchPersistentContext/);
+  }
+});
