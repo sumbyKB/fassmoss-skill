@@ -73,6 +73,19 @@ function parseOverview(text = '') {
   return o;
 }
 
+/* 列表首列「达人信息」自带画像：name\nID：xxx\n女性\n85.06%\n年龄\n25-34。
+ * 详情页「粉丝分析」页签常为「暂无数据」，这里是唯一可拿到的性别/年龄画像。 */
+function parseCreatorInfo(s = '') {
+  const lines = s.split('\n').map((x) => x.trim()).filter(Boolean);
+  const handle = (lines[1] || '').replace(/^ID[:：]\s*/, '');
+  const gi = lines.findIndex((x) => /^(女性|男性|其他)$/.test(x));
+  const gender = gi >= 0 ? lines[gi] : null;
+  const femalePct = gi >= 0 && /^\d+(\.\d+)?%$/.test(lines[gi + 1] || '') ? Number(lines[gi + 1].replace('%', '')) : null;
+  const ai = lines.findIndex((x) => x === '年龄');
+  const age = ai >= 0 ? (lines[ai + 1] || null) : null;
+  return { handle, gender, femalePct, age };
+}
+
 /* ---------- 表格解析 ---------- */
 const pickTable = (tables, kw) => tables.find((t) => t.headers.some((h) => h.includes(kw)));
 
@@ -172,6 +185,7 @@ const searchById = new Map(candidates.records.map((r) => [r.id, r]));
 const creators = details.details.filter((d) => !d.error).map((d) => {
   const parsed = parseDetail(d);
   const search = searchById.get(d.id) || {};
+  const info = parseCreatorInfo(search.cells?.[0] || '');
   return {
     id: d.id,
     name: (d.overview?.pageName || '').replace(/（.*$/, '').trim(),
@@ -185,6 +199,10 @@ const creators = details.details.filter((d) => !d.error).map((d) => {
       engage: search.cells?.[8] || null,
       likeFans: search.cells?.[9] || null,
       categories: (search.cells?.[1] || '').replace(/\n/g, ' / '),
+      handle: info.handle || null,
+      gender: info.gender,
+      femalePct: info.femalePct,
+      ageBand: info.age,
     },
     overview: parseOverview(d.overview?.text),
     competitorPromotions: countPromotions(parsed, targetProducts),
@@ -243,7 +261,7 @@ for (const c of topList) {
 /* 输出验收表 */
 const head = ['#', '达人', 'handle', '粉丝', '28天GMV', '包商品', '包均价', '包GMV', '包件均', '佣金%', '样本GMV', 'GPM', '测评%'];
 const rows = topList.map((c, i) => [
-  i + 1, c.name, c.search28.followers, c.overview.fans?.raw, c.search28.gmv,
+  i + 1, c.name, c.search28.handle, c.overview.fans?.raw, c.search28.gmv,
   `${c.calc.bagProducts}/${c.calc.productsSampled}`, c.calc.bagAvgPrice, c.calc.bagGmv, c.calc.bagUnitGmv,
   c.calc.commissionAvg, c.calc.sampleVideoGmv, c.calc.gpmPer1000Views, c.calc.reviewShare,
 ].join('\t'));
@@ -328,6 +346,11 @@ function buildCompetitorMatrix(creators) {
 
 // 投产潜力：净贡献率 = 毛利率 − 佣金率 − 退款损失率（毛利率/退款率作为可调假设参数）
 // 投产分级结合三项：净贡献率 + 包GMV规模（盘子越大越值得投） + 箱包垂直度。
+// 包GMV「规模盘子」阈值按币种给（以 USD 5 万为基准的近似汇率换算，用于分级，非精确汇率）。
+const BAG_GMV_THRESHOLD = {
+  USD: 50000, THB: 1500000, IDR: 700000000, VND: 1200000000, MYR: 220000,
+  PHP: 2500000, JPY: 7000000, SGD: 65000, MXN: 850000, BRL: 250000,
+};
 function estimateROI(c, { grossMargin = 0.6, refundRate = 0.05 } = {}) {
   if (c.calc.commissionAvg == null) return {netContribution:null, grade:'佣金未知', breakeven:null};
   const comm = c.calc.commissionAvg / 100;
@@ -335,10 +358,11 @@ function estimateROI(c, { grossMargin = 0.6, refundRate = 0.05 } = {}) {
   const netRounded = +net.toFixed(3); // 规避浮点误差（0.6-0.15-0.05=0.399999...）
   const bagShare = c.calc.bagProductShare ?? 0;
   const bagGmv = c.calc.bagGmv ?? 0;
-  // 高：净贡献率≥40% 且（箱包垂直 或 包GMV≥$5万）；中：净贡献率≥40%；低：其余
+  // 高：净贡献率≥40% 且（箱包垂直 或 包GMV≥本币阈值）；中：净贡献率≥40%；低：其余
+  const threshold = BAG_GMV_THRESHOLD[CURRENCY];
+  if (!threshold) return { netContribution: netRounded, grade: '待配置本币阈值', breakeven: null };
   let grade;
-  if (CURRENCY !== 'USD') return { netContribution: netRounded, grade: '待配置本币阈值', breakeven: null };
-  if (netRounded >= 0.40 && (bagShare >= 90 || bagGmv >= 50000)) grade = '高';
+  if (netRounded >= 0.40 && (bagShare >= 90 || bagGmv >= threshold)) grade = '高';
   else if (netRounded >= 0.40) grade = '中';
   else grade = '低';
   return { netContribution: netRounded, grade, breakeven: null }; // breakeven 需固定成本，缺省不估算
@@ -471,6 +495,17 @@ function renderReport(creators, competitor, opts) {
     const netPct = roi.netContribution == null ? '未知' : (roi.netContribution * 100).toFixed(0) + '%';
     push(`| ${c.name} | ${pct(c.calc.commissionAvg)} | ${netPct} | ${roi.grade} |`);
   }
+  push('');
+
+  // 维度8 粉丝画像（列表页首列自带，非详情页「粉丝分析」页签）
+  push('### 8. 粉丝画像（列表页自带）');
+  push('');
+  push('| 达人 | 性别 | 女性占比 | 主力年龄 |');
+  push('|---|---|---|---|');
+  for (const c of creators) {
+    push(`| ${c.name} | ${orDash(c.search28.gender)} | ${c.search28.femalePct == null ? '—' : c.search28.femalePct + '%'} | ${orDash(c.search28.ageBand)} |`);
+  }
+  push('> 来源：列表页首列「达人信息」；详情页「粉丝分析」页签常为「暂无数据」。女性占比对女包类目筛选有参考价值。');
   push('');
 
   // 五、缺口清单

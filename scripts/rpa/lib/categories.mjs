@@ -44,6 +44,7 @@ export function resolveCategoryOptions(opts) {
   for (const value of [categoryId, categoryId2, categoryId3]) {
     if (value !== null && !/^\d+$/.test(String(value))) throw new Error('分类ID必须为数字字符串');
   }
+  if (categoryId === null && categoryId2 === null && categoryId3 === null && !opts.category) return { categoryId, categoryId2, categoryId3, matched: null };
   const file = opts['categories-file'] || path.join(SKILL_ROOT, 'outputs', 'categories.json');
   const tree = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const resolved = opts.category ? resolveCategoryId(opts.category, file) : null;

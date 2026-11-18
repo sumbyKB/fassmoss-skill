@@ -24,7 +24,7 @@ export async function cmdAd(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `ads-${Date.now()}.json`);
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0], `${SHOP_BASE}`);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country).catch((e) => { log(`切国家失败（忽略）：${e.message}`); return null; }) : null;
   const region = country ? (REGION_BY_LABEL[country] || 'US') : 'US';

@@ -1,27 +1,22 @@
 #!/usr/bin/env node
-/**
- * 一次性准备 playwright 到技能目录的 .tools（本地安装，不入库）
- *   node scripts/rpa/setup.mjs
- */
+// 兼容原安装入口；按标准锁文件安装，不猜测 npm 在 Node 旁边的路径。
 import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { SKILL_ROOT } from './lib/config.mjs';
+import { assertNodeVersion } from './lib/runtime.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SKILL_ROOT = path.resolve(__dirname, '../..');
-const TOOLS = path.join(SKILL_ROOT, '.tools');
-const NODE = process.execPath;
-const NPM_CLI = path.join(path.dirname(NODE), 'node_modules/npm/bin/npm-cli.js');
-
-fs.mkdirSync(TOOLS, { recursive: true });
-
-if (fs.existsSync(path.join(TOOLS, 'node_modules/playwright/package.json'))) {
-  console.log('playwright 已存在：', path.join(TOOLS, 'node_modules/playwright'));
-  process.exit(0);
+try {
+  assertNodeVersion();
+  const installOptions = { cwd: SKILL_ROOT, stdio: 'inherit', windowsHide: true };
+  // npm.cmd 需要解释器；命令为固定值，不拼接用户输入或项目路径。
+  if (process.platform === 'win32') {
+    execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm.cmd ci --no-audit --no-fund'], installOptions);
+  } else {
+    execFileSync('npm', ['ci', '--no-audit', '--no-fund'], installOptions);
+  }
+  const { doctor } = await import('./doctor.mjs');
+  await doctor();
+  console.log('环境准备完成。首次使用请运行 node scripts/rpa/login-window.mjs，在打开的窗口登录并关闭窗口。');
+} catch (error) {
+  console.error('环境准备失败：', error.message);
+  process.exitCode = 1;
 }
-
-console.log('安装 playwright 到', TOOLS);
-execFileSync(NODE, [NPM_CLI, 'install', 'playwright@1.65.0-alpha-2026-10-30', '--no-audit', '--no-fund',
-  '--cache', path.join(SKILL_ROOT, '.npmcache')], { cwd: TOOLS, stdio: 'inherit' });
-console.log('完成。首次运行会使用系统 Chrome（channel=chrome），无需下载浏览器。');

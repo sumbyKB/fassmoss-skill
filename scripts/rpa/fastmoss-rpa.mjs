@@ -13,6 +13,14 @@
  *
  * 代码结构：本文件只做入口与命令分发；共享基础设施在 lib/，各业务命令在 commands/。
  *
+ * 新增工作流：
+ *   product-creators --country 美国 --id <商品ID> [--peer-ids <竞品ID>] --follower 5000,50000 --top 20
+ *     商品关联表原始口径；不传period不假定近期周期，报价保持未知。
+ *   new-opportunities --country 美国 --category 箱包 --pages 3 --scan 30 --top 10 [--with-roi]
+ *     或 --input newproducts.json；任意类目近7天逐日趋势与规则排序，非爆款预测。
+ *   competitor-diff --country 美国 --shop-id <店铺ID> [--previous old.snapshot.json] [--sections products,creators,videos]
+ *     首次建基线，之后比较；离线用 --current new.snapshot.json --previous old.snapshot.json。
+ *
  * 用法：
  *   node scripts/rpa/fastmoss-rpa.mjs search  --follower 5000,50000 --category 7 --pages 60 --out out.json
  *   node scripts/rpa/fastmoss-rpa.mjs detail  --ids 123,456 --out details.json
@@ -99,6 +107,9 @@ import { cmdSearch, cmdDetail, cmdPipeline } from './commands/influencer.mjs';
 import { cmdProduct, cmdProductRoi, cmdCategoryRoi } from './commands/product.mjs';
 import { cmdNewProducts } from './commands/new-products.mjs';
 import { cmdHotVideo } from './commands/hot-video.mjs';
+import { cmdProductCreators } from './commands/product-creators.mjs';
+import { cmdNewOpportunities } from './commands/new-opportunities.mjs';
+import { cmdCompetitorDiff } from './commands/competitor-diff.mjs';
 import { cmdShop, cmdShopDetail, cmdShopDetailReport } from './commands/shop.mjs';
 import { cmdShopTrend } from './commands/shop-trend.mjs';
 import { cmdShopCompare } from './commands/shop-compare.mjs';
@@ -121,6 +132,9 @@ export const HANDLERS = {
   'category-roi': cmdCategoryRoi,
   'new-products': cmdNewProducts,
   'hot-video': cmdHotVideo,
+  'product-creators': cmdProductCreators,
+  'new-opportunities': cmdNewOpportunities,
+  'competitor-diff': cmdCompetitorDiff,
   shop: cmdShop,
   'shop-detail': cmdShopDetail,
   'shop-detail-report': cmdShopDetailReport,
@@ -135,7 +149,7 @@ export const HANDLERS = {
   categories: cmdCategories,
 };
 
-/** 全部命令名（HANDLERS 的 key 是唯一权威来源，run-background / 测试都从这里取，避免重复维护清单） */
+/** 全部命令名（HANDLERS 的 key 是唯一权威来源，测试都从这里取，避免重复维护清单） */
 export const COMMAND_NAMES = Object.keys(HANDLERS);
 
 export const main = async (argv = process.argv.slice(2)) => {
@@ -154,7 +168,7 @@ export const main = async (argv = process.argv.slice(2)) => {
   }
 };
 
-// 只在直接运行时执行 main（被 import 时不执行，供 run-background / 测试复用 HANDLERS 而不会误跑命令）
+// 只在直接运行时执行 main（被 import 时不执行，供 测试复用 HANDLERS 而不会误跑命令）
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     console.error('RPA 失败：', e.message);

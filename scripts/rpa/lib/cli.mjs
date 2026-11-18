@@ -29,6 +29,6 @@ export function parseArgs(argv) {
       throw new Error('--' + key + ' 必须为正整数');
     }
   }
-  if (opts.headed !== undefined && ![true, 'true', 'false'].includes(opts.headed)) throw new Error('--headed 只接受 true 或 false');
+  if (opts.headed !== undefined) throw new Error('--headed 已移除，采集统一打开项目独立 Chrome');
   return opts;
 }

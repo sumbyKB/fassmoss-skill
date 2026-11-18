@@ -1,5 +1,7 @@
 # 快速网页执行（RPA 主路径）
 
+已有 `pipeline` 生成的 `candidates.json` 时，可以直接运行 `node scripts/rpa/fastmoss-rpa.mjs detail --ids-file outputs/批次/candidates.json --top 5 --concurrency 5 --out outputs/批次/details-pilot.json`。脚本读取命中类目的 `bagRelevant` ID，沿用名单站点，并在同一独立窗口打开最多五个详情标签页。先核对各模块的实际覆盖，再决定是否扩大并发。
+
 先按任务选择采集入口，再复用已登录的 FastMoss 网页读取数据。批量任务用 `scripts/rpa/fastmoss-rpa.mjs` 一次完成采集与落盘；需要单独分析的任务再运行对应分析脚本。
 
 ## 按任务选择入口
@@ -18,7 +20,9 @@
 
 批量采集使用 Playwright 和本机独立的 `.browser-profile/` 保存登录状态。首次运行 `setup.mjs` 后，运行 `login-window.mjs`，在弹出的窗口人工登录并关闭该窗口，再启动采集。同一 profile 同时只运行一个登录或采集进程。
 
-采集默认无界面；需脱离终端继续运行时用 `run-background.mjs <子命令及参数>`。只有用户明确要求前台演示或调试时才开启可见窗口。通过当前环境的浏览器工具抽查页面时，先确认连接的标签页已登录；扩展连接的日常 Chrome 与 RPA profile 的登录状态独立。
+采集命令统一打开项目独立 Chrome。
+
+登录态校验默认等 30s（风控/慢网下首屏渲染约 30s，过短会误判成「顶栏没渲染」）。可用环境变量 `FMS_ASSERT_TIMEOUT_MS` 覆盖，单位毫秒，最小 2000。
 
 ## 商品 ROI：一条命令完成采集与报告
 
@@ -32,10 +36,10 @@ node scripts/rpa/login-window.mjs
 登录完成并关闭登录窗口后：
 
 ```text
-node scripts/rpa/run-background.mjs product-roi --country 美国 --keyword earbuds --pages 1 --top 10 --period 28 --out outputs/product-roi/product-roi.json
+node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --keyword earbuds --pages 1 --top 10 --period 28 --out outputs/product-roi/product-roi.json
 ```
 
-替换国家、关键词、数量和周期即可复用。返回 PID 和日志路径后，通过日志末尾及 `outputs/product-roi/product-roi.json` / `product-roi.md` 核对完成情况；启动成功只代表进程已创建。每个批次使用独立输出目录，避免覆盖已有报告。
+采集命令统一打开项目独立 Chrome。
 
 已有商品清单时，将 `--keyword earbuds --pages 1 --top 10` 换成 `--ids-file outputs/批次/products.json`；单个商品用 `--ids 商品ID`。三种输入选一种。逐个商品读取同一周期的投流销售额和广告消耗，ROI=前者÷后者，平台 ROAS 单独保留。缺指标、周期不明或广告消耗为0时显示未知，验证或权限提示会停止后续访问。
 
@@ -44,7 +48,7 @@ node scripts/rpa/run-background.mjs product-roi --country 美国 --keyword earbu
 ## 达人任务：采集后离线分析
 
 ```bash
-# 0. 首次：装 playwright 到技能目录 .tools（不入库）
+# 0. 首次：按 package-lock.json 安装依赖到 node_modules 并无界面自检
 node scripts/rpa/setup.mjs
 
 # 1. 一次性登录（弹出 Chrome 窗口，手动登录一次，登录态存 .browser-profile/）
@@ -59,6 +63,9 @@ node scripts/rpa/fastmoss-rpa.mjs pipeline \
 
 # 3. 离线分析：candidates.json + details.json → 推荐名单 / 竞品 / evidence / 多维度分析报告
 node scripts/rpa/analyze.mjs --dir outputs/2026-11-09-us-bags-rpa --top 10
+
+# 3b. 逐人达人档案（基础/内容标签/粉丝画像/优劣势/风险点/收益锚/合作形式）
+node scripts/rpa/analyze-profiles.mjs --dir outputs/2026-11-09-us-bags-rpa --top 10 --subcategory 女包
 ```
 
 子命令：

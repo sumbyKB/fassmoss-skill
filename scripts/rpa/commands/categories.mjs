@@ -45,7 +45,7 @@ function parseCategoryInfo(text) {
 /** categories：抓完整分类树（一级 + 二级 + 三级，含分类 ID），供 product/shop/category-roi 做分类筛选。 */
 export async function cmdCategories(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', 'categories.json');
-  const { context } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context } = await openBrowser();
   const page = context.pages()[0];
   let tracker;
   try {

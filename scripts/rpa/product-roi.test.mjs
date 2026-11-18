@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createRequire } from 'node:module';
+import { loadPlaywright, browserLaunchOptions } from './lib/runtime.mjs';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { execFileSync } from 'node:child_process';
@@ -75,10 +75,8 @@ test('sales analysis passes selected product IDs and links directly to the ROI c
 });
 
 test('real headless DOM collection scopes totals to #putData and waits for period refresh', async t => {
-  const require = createRequire(import.meta.url);
-  const root = fileURLToPath(new URL('../../', import.meta.url));
-  const { chromium } = require(path.join(root, '.tools/node_modules/playwright'));
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const { chromium } = loadPlaywright();
+  const browser = await chromium.launch({ ...browserLaunchOptions(), headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);

@@ -68,7 +68,7 @@ export const REGION_BY_LABEL = {
 export function resolveCountry(raw) {
   if (!raw) return null;
   const key = String(raw).trim().toLowerCase();
-  if (COUNTRIES[key]) return COUNTRIES[key];
+  if (Object.hasOwn(COUNTRIES, key)) return COUNTRIES[key];
   // 兜底：中文名直接查
   for (const [k, v] of Object.entries(COUNTRIES)) {
     if (k === String(raw).trim()) return v;

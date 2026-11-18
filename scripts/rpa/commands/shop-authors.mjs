@@ -47,7 +47,7 @@ export async function cmdShopAuthors(opts) {
   const reportFile = outFile.slice(0, -5) + '.md';
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0], SHOP_SEARCH);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || 'THB');

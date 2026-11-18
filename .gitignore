@@ -26,3 +26,5 @@ Thumbs.db
 .tools/
 .browser-profile/
 .playwright-cli/
+.npmcache/
+.doctor-*/

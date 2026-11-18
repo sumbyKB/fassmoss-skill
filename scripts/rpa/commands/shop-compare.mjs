@@ -85,7 +85,7 @@ export async function cmdShopCompare(opts) {
   const reportFile = outFile.slice(0, -5) + '.md';
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0]);
   const countryLabel = country ? await switchCountry(context.pages()[0], country) : await safeEval(context.pages()[0], labels => [...document.querySelectorAll('button')].map(e => e.innerText.trim()).find(text => labels.includes(text)) || null, COUNTRY_LABELS);
   if (!countryLabel) throw new Error('无法确认当前站点，请显式传 --country');

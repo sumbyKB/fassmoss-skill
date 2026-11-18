@@ -56,10 +56,10 @@ function buildSearchUrl({ follower, category, page = 1, extra = '' }) {
 /* ---------------- 达人搜索 ---------------- */
 export async function cmdSearch(opts) {
   const pages = Number(opts.pages || 1);
-  const concurrency = Number(opts.concurrency || 6);
+  const concurrency = Math.min(5, Number(opts.concurrency || 5));
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `search-${Date.now()}.json`);
   const t0 = Date.now();
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
 
   const [first] = context.pages();
   await assertLoggedIn(first);
@@ -285,19 +285,25 @@ async function grabDetail(page, id, opts = {}) {
 /* ---------------- 达人详情 ---------------- */
 export async function cmdDetail(opts) {
   let ids = [];
+  let listCountry;
   if (opts['ids-file']) {
     const raw = JSON.parse(fs.readFileSync(opts['ids-file'], 'utf8'));
-    ids = Array.isArray(raw) ? raw.map((x) => (typeof x === 'string' ? x : x.id)) : raw.ids || [];
+    ids = Array.isArray(raw) ? raw.map((x) => (typeof x === 'string' ? x : x?.id)) : raw.ids ?? raw.bagRelevant ?? [];
+    listCountry = raw.meta?.country;
   }
   if (opts.ids) ids = String(opts.ids).split(',').map((s) => s.trim()).filter(Boolean);
-  if (!ids.length) throw new Error('缺少 --ids 或 --ids-file');
+  if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !/^\d+$/.test(id))) throw new Error('达人 ID 必须为完整数字字符串');
+  ids = [...new Set(ids)].slice(0, Number(opts.top ?? ids.length));
+  if (!ids.length) throw new Error('没有可采集的达人 ID，请检查 --ids 或 --ids-file');
+  const targetCountry = opts.country || listCountry;
+  if (opts.country && listCountry && resolveCountry(opts.country).label !== resolveCountry(listCountry).label) throw new Error('指定站点与候选名单站点不一致');
 
-  const concurrency = Number(opts.concurrency || 1);
+  const concurrency = Number(opts.concurrency || 5);
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `details-${Date.now()}.json`);
   const t0 = Date.now();
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0]);
-  const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
+  const country = targetCountry ? await switchCountry(context.pages()[0], targetCountry) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
 
   const results = await poolWithPage(context, ids, concurrency, async (page, id) => {
@@ -359,14 +365,14 @@ export async function cmdPipeline(opts) {
   const outDir = opts['out-dir'] || path.join(SKILL_ROOT, 'outputs', `rpa-${new Date().toISOString().slice(0, 10)}`);
   fs.mkdirSync(outDir, { recursive: true });
   const pages = Number(opts.pages || 60);
-  const concurrency = Number(opts.concurrency || 6);
+  const concurrency = Math.min(5, Number(opts.concurrency || 5));
   // 详情页必须串行：实测并发 3 会让约 40% 的后台 tab 懒加载接口不触发（丢数据 + 等满超时更慢）。
   // 串行单页稳定 3s、100% 成功；列表页很轻（只读搜索表格），可高并发。
-  const dConc = Number(opts['detail-concurrency'] || 1);
+  const dConc = Number(opts['detail-concurrency'] || 5);
   const top = Number(opts.top || 18);
 
   const t0 = Date.now();
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0]);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');

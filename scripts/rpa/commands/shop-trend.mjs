@@ -1,5 +1,6 @@
 // 店铺趋势：两个完整等长周期的逐日对比，以及已采集商品的涨跌归因。
 import fs from 'node:fs';
+import { poolWithPage } from '../lib/pool.mjs';
 import path from 'node:path';
 import { BASE, SKILL_ROOT, COUNTRY_LABELS, resolveCountry } from '../lib/config.mjs';
 import { log } from '../lib/cli.mjs';
@@ -50,7 +51,7 @@ export async function cmdShopTrend(opts) {
   if (!outFile.toLowerCase().endsWith('.json')) throw new Error('--out 请使用 .json 文件名');
   const reportFile = outFile.slice(0, -5) + '.md';
   const t0 = Date.now();
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   const page = context.pages()[0];
   const result = { collected_at: new Date().toISOString(), status: 'running', shop_name: shopName, shop_id: shopId, country: null, currency: null, compare_days: days, overview: {}, shop: null, products: [], coverage: { scope: 'page_visible_products', historical_coverage_complete: false }, attribution: { risers: [], decliners: [] } };
   const trackers = [];
@@ -88,24 +89,25 @@ export async function cmdShopTrend(opts) {
 
     // 从首次导航起就监听商品列表，避免为重新捕获接口而整页重载。
     await page.evaluate(() => [...document.querySelectorAll('table')].find(t => t.querySelector('a[href*="/e-commerce/detail/"]'))?.scrollIntoView());
-    const listing = await collectShopProducts(page, goods, { maxPages });
-    result.coverage = { ...result.coverage, ...listing.coverage };
-    result.products = listing.products.map(p => ({
-      id: p.product_id, title: p.title, price: p.price, ori_price: p.ori_price, crate: p.crate,
-      ctime: p.ctime, category_l2: Array.isArray(p.category_name_l2) ? p.category_name_l2.join('/') : p.category_name_l2 || null,
-      product_rating: p.product_rating, relate_author_count: p.relate_author_count, tiktok_url: p.detail_url,
-      fastmoss_url: `${GOODS_DETAIL}/${p.product_id}`,
-      listing_period_days: listing.coverage.period_days, listed_units: parseAmount(p.sold_count), listed_gmv: parseAmount(p.sale_amount),
-      sold_28d: listing.coverage.period_days === 28 ? parseAmount(p.sold_count) : null,
-      amount_28d: listing.coverage.period_days === 28 ? parseAmount(p.sale_amount) : null,
-      status: 'not_attempted', cmp: null,
-    }));
-    save();
-    const overview = makeTracker(page, '/api/goods/v3/overview');
-    trackers.push(overview);
-    for (const product of result.products) {
+    const recordListing = listing => {
+      result.coverage = { ...result.coverage, ...listing.coverage };
+      result.products = listing.products.map(p => ({
+        id: p.product_id, title: p.title, price: p.price, ori_price: p.ori_price, crate: p.crate,
+        ctime: p.ctime, category_l2: Array.isArray(p.category_name_l2) ? p.category_name_l2.join('/') : p.category_name_l2 || null,
+        product_rating: p.product_rating, relate_author_count: p.relate_author_count, tiktok_url: p.detail_url,
+        fastmoss_url: `${GOODS_DETAIL}/${p.product_id}`,
+        listing_period_days: listing.coverage.period_days, listed_units: parseAmount(p.sold_count), listed_gmv: parseAmount(p.sale_amount),
+        sold_28d: listing.coverage.period_days === 28 ? parseAmount(p.sold_count) : null,
+        amount_28d: listing.coverage.period_days === 28 ? parseAmount(p.sale_amount) : null,
+        status: 'not_attempted', cmp: null,
+      }));
+      save();
+    };
+    const listing = await collectShopProducts(page, goods, { maxPages, onPage: recordListing });
+    recordListing(listing);
+    await poolWithPage(context, result.products, Number(opts.concurrency ?? 5), async (page, product) => {
+      const overview = makeTracker(page, '/api/goods/v3/overview', { product_id: product.id });
       try {
-        overview.reset({ product_id: product.id });
         await page.goto(product.fastmoss_url, { waitUntil: 'domcontentloaded' });
         const first = await waitTracked(overview, value => { try { return Array.isArray(JSON.parse(value)?.data?.chart_list); } catch { return false; } }, { check: () => assertPageAccess(page) });
         if (!first) throw new Error('商品趋势未加载');
@@ -117,9 +119,9 @@ export async function cmdShopTrend(opts) {
         product.status = error.code === 'FASTMOSS_BLOCKED' ? 'blocked' : 'error';
         product.error = error.message;
         if (error.code === 'FASTMOSS_BLOCKED') throw error;
-      } finally { save(); }
+      } finally { overview.dispose(); save(); }
       log(`商品趋势 ${product.id}：${product.status}`);
-    }
+    }, { firstPage: page });
     result.status = result.coverage.comparison_complete ? 'complete' : 'partial';
     save();
     return { result, outFile, reportFile };

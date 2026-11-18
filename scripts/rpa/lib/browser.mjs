@@ -1,82 +1,92 @@
 // 浏览器生命周期：启动 persistent context、登录检测、国家切换、SPA 安全的 DOM 求值。
 import fs from 'node:fs';
-import path from 'node:path';
-import { createRequire } from 'node:module';
-import { BASE, PROFILE_DIR, SKILL_ROOT, COUNTRY_LABELS, resolveCountry } from './config.mjs';
+import { loadPlaywright, browserLaunchOptions, browserLaunchError } from './runtime.mjs';
+import { BASE, PROFILE_DIR, COUNTRY_LABELS, resolveCountry } from './config.mjs';
 import { log } from './cli.mjs';
 
 /** 所有存活的浏览器上下文，入口 finally 统一关闭，避免资源泄漏 */
 export const activeContexts = new Set();
 
-/** 加载技能目录 .tools 下本地安装的 playwright（不入库、不依赖全局安装） */
-function loadPlaywright() {
-  const require = createRequire(import.meta.url);
-  const candidates = [
-    'playwright',
-    path.join(SKILL_ROOT, '.tools/node_modules/playwright'),
-    path.join(SKILL_ROOT, 'node_modules/playwright'),
-  ];
-  for (const c of candidates) {
-    try { return require(c); } catch (e) { /* next */ }
-  }
-  throw new Error('未找到 playwright。请先执行：node scripts/rpa/setup.mjs');
-}
-
 /** 记录每个 context 是否拦截图片（WeakMap：运行时可动态切换，用于「默认拦图加速、触发验证码时放行」） */
 const blockImages = new WeakMap();
 
 /** 打开持久化浏览器上下文（复用登录态）。返回 { context, launchMs }，context 登记到 activeContexts。 */
-export async function openBrowser({ headed = false, channel = 'chrome', allowImages = false } = {}) {
+export async function openBrowser({ allowImages = false } = {}) {
   const { chromium } = loadPlaywright();
   fs.mkdirSync(PROFILE_DIR, { recursive: true });
   const t0 = Date.now();
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
-    channel,
-    headless: !headed,
-    viewport: { width: 1440, height: 900 },
-    locale: 'zh-CN',
-    timezoneId: 'America/New_York',
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-first-run',
-      // 多 tab 并发时，后台 tab 会被 Chromium 降频：IntersectionObserver 不回调 → 懒加载接口根本不发请求。
-      // 这三个开关让后台 tab 也正常渲染，并发才是真的并发。
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-    ],
-  });
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(PROFILE_DIR, browserLaunchOptions());
+  } catch (error) {
+    throw browserLaunchError(error);
+  }
   activeContexts.add(context);
   context.once('close', () => activeContexts.delete(context));
   const launchMs = Date.now() - t0;
   // 只抓 DOM：图片/字体/视频默认拦掉，页面加载明显更快（列表与详情都不依赖这些资源）。
-  // allowImages=true 时放行图片；也可运行中用 enableImages() 动态放行（如触发验证码需展示图片时）。
+  // 人工登录窗口始终显示图片，采集窗口在人工验证期间临时放行。
   blockImages.set(context, !allowImages);
-  await context.route('**/*', (route) => {
-    const t = route.request().resourceType();
-    if (blockImages.get(context) && (t === 'image' || t === 'media' || t === 'font')) return route.abort();
-    return route.fallback();
-  });
-  context.setDefaultTimeout(20000);
-  context.setDefaultNavigationTimeout(45000);
-  return { context, launchMs };
+  try {
+    await context.route('**/*', (route) => {
+      const t = route.request().resourceType();
+      if (blockImages.get(context) && !verificationCounts.get(context) && (t === 'image' || t === 'media' || t === 'font')) return route.abort();
+      return route.fallback();
+    });
+    context.setDefaultTimeout(20000);
+    context.setDefaultNavigationTimeout(45000);
+    return { context, launchMs };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
 }
 
-/** 运行时放行图片加载（触发腾讯验证码等需要展示图片时调用） */
-export function enableImages(context) {
-  blockImages.set(context, false);
+const pendingVerification = new WeakMap();
+const verificationCounts = new WeakMap();
+
+async function waitForManualVerification(page) {
+  const context = page.context?.();
+  if (!context || !blockImages.has(context)) return false;
+  const existing = pendingVerification.get(page);
+  if (existing) return existing;
+
+  verificationCounts.set(context, (verificationCounts.get(context) || 0) + 1);
+  const waiting = (async () => {
+    log('请在当前独立 Chrome 窗口完成验证码。已放行图片，若图片仍空白，请使用验证码面板的刷新按钮。最多等待 3 分钟。');
+    const deadline = Date.now() + 180000;
+    while (Date.now() < deadline && !page.isClosed()) {
+      await page.waitForTimeout(400);
+      if (!await safeEval(page, hasCaptchaPopup)) return true;
+    }
+    return false;
+  })();
+  pendingVerification.set(page, waiting);
+  try {
+    return await waiting;
+  } finally {
+    pendingVerification.delete(page);
+    verificationCounts.set(context, verificationCounts.get(context) - 1);
+  }
+}
+
+function hasCaptchaPopup() {
+  const popup = document.querySelector('#tCaptchaMaskLayer');
+  return !!popup?.getClientRects().length && getComputedStyle(popup).visibility !== 'hidden';
 }
 
 /** 只读取可见拦截状态；后台任务不得通过弹窗或等待人工来继续采集。 */
 export function pageAccessBlocker() {
   const text = document.body?.innerText || '';
-  if (document.querySelector('#tCaptchaMaskLayer') || /Web\s*Security|Access Denied/i.test(document.title) || /正在保护|进一步确认|请求 ID/.test(text)) return 'FastMoss 需要人工完成访问验证；请单独打开登录窗口处理后重试';
+  const popup = document.querySelector('#tCaptchaMaskLayer');
+  if ((popup?.getClientRects().length && getComputedStyle(popup).visibility !== 'hidden') || /Web\s*Security|Access Denied/i.test(document.title) || /正在保护|进一步确认|请求 ID/.test(text)) return 'FastMoss 访问验证尚未通过，请在独立窗口完成人工验证后重试';
   if (/功能使用次数已达|已达.*(?:上限|限制)|升级.*(?:解锁|查看完整)/.test(text)) return 'FastMoss 网页次数或权限受限';
   if (/您当前是游客身份/.test(text) || [...document.querySelectorAll('button')].some(e => /^(登录|登 录|Log in|Sign in)$/.test(e.innerText.trim()))) return 'FastMoss 当前采集窗口未登录';
   return null;
 }
 
 export async function assertPageAccess(page) {
+  if (await safeEval(page, hasCaptchaPopup)) await waitForManualVerification(page);
   const message = await safeEval(page, pageAccessBlocker);
   if (message) { const error = new Error(message); error.code = 'FASTMOSS_BLOCKED'; throw error; }
 }
@@ -99,18 +109,24 @@ export async function safeEval(page, fn, arg) {
 export async function assertLoggedIn(page, detectUrl) {
   const url = detectUrl || `${BASE}/influencer/search?page=1`;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  // SPA 会二次跳转，徽标要等 userinfo 接口回来；轮询判定，别一次性判死
-  for (let i = 0; i < 20; i++) {
+  // SPA 会二次跳转，徽标要等 userinfo 接口回来；轮询判定，别一次性判死。
+  // 默认等 30s：风控/慢网下首屏渲染实测约 30s，原 8s 会误判成「页面被拦」。
+  // 可用环境变量 FMS_ASSERT_TIMEOUT_MS 覆盖（毫秒，最小 2000）。
+  const timeoutMs = Math.max(2000, Number(process.env.FMS_ASSERT_TIMEOUT_MS) || 30000);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
     const st = await safeEval(page, () => {
       const t = document.body.innerText;
       const loginBtns = [...document.querySelectorAll('button,a')].filter((e) =>
         /^(登录|登 录|Log in|Sign in)$/i.test((e.innerText || '').trim())
       ).length;
       const hasUser = /旗舰版|专业版|免费版|基础版/.test(t) || /\d{3}\*{4}\d{4}/.test(t);
-      const risk = !!document.querySelector('#tCaptchaMaskLayer') || /Web\s*Security|Access Denied/i.test(document.title) || /正在保护|进一步确认|请求 ID/.test(t);
+      const popup = document.querySelector('#tCaptchaMaskLayer');
+      const risk = (!!popup?.getClientRects().length && getComputedStyle(popup).visibility !== 'hidden') || /Web\s*Security|Access Denied/i.test(document.title) || /正在保护|进一步确认|请求 ID/.test(t);
       return { hasUser, loginBtns, text: t.length, risk };
     }).catch(() => ({ hasUser: false, loginBtns: 0, text: 0, risk: false }));
     if (st.risk) {
+      if (await safeEval(page, hasCaptchaPopup) && await waitForManualVerification(page)) continue;
       // 命中风控页：给出请求 ID 与建议，而非误判为「未登录」
       const error = new Error('FastMoss 触发风控验证。请单独运行登录窗口完成人工验证后重试。');
       error.code = 'FASTMOSS_BLOCKED';
@@ -122,9 +138,10 @@ export async function assertLoggedIn(page, detectUrl) {
       error.code = 'FASTMOSS_BLOCKED';
       throw error;
     }
+    if (Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 400));
   }
-  throw new Error('FastMoss 顶栏 8 秒内没渲染出来：检查网络或页面是否被拦（可先 --headed true 观察）。');
+  throw new Error(`FastMoss 顶栏 ${Math.round(timeoutMs / 1000)} 秒内没渲染出来：检查网络或页面是否被拦。`);
 }
 
 /**

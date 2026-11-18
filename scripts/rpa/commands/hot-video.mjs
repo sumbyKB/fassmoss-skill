@@ -73,7 +73,7 @@ export async function cmdHotVideo(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `hot-video-${Date.now()}.json`);
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   const page = context.pages()[0];
   await assertLoggedIn(page);
   const country = opts.country ? await switchCountry(page, opts.country) : null;

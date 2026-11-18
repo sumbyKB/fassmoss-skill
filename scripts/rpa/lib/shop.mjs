@@ -63,13 +63,13 @@ function goodsControls({ advance = false } = {}) {
   return { canNext: false, clicked: false, paginationFound: false, periodRootId: null };
 }
 
-export async function collectShopProducts(page, tracker, { maxPages = 100 } = {}) {
+export async function collectShopProducts(page, tracker, { maxPages = 100, onPage = () => {}, select90Days = true } = {}) {
   const wait = () => waitTracked(tracker, body => { try { return Array.isArray(JSON.parse(body)?.data?.product_list); } catch { return false; } }, { check: () => assertPageAccess(page) });
   let body = await wait();
   if (!body) throw new Error('未拿到店铺商品列表');
   let controls = await safeEval(page, goodsControls);
   let uiPeriod = null;
-  if (controls.periodRootId) {
+  if (select90Days && controls.periodRootId) {
     const radio = page.locator(`[id=${JSON.stringify(controls.periodRootId)}]`).getByRole('radio', { name: '近90天', exact: true });
     if (!controls.period90Checked) {
       tracker.reset();
@@ -80,7 +80,8 @@ export async function collectShopProducts(page, tracker, { maxPages = 100 } = {}
     }
   }
   const address = tracker.url() ? new URL(tracker.url()) : null;
-  const period = uiPeriod || Number(address?.searchParams.get('date_type') || address?.searchParams.get('d_type')) || null;
+  const declaredPeriod = Number(address?.searchParams.get('d_type') || address?.searchParams.get('date_type'));
+  const period = uiPeriod || ([7, 28, 90, 180].includes(declaredPeriod) ? declaredPeriod : null);
   const products = new Map();
   let pagesRead = 0;
   let total = null;
@@ -98,6 +99,8 @@ export async function collectShopProducts(page, tracker, { maxPages = 100 } = {}
       if (/^\d+$/.test(id)) products.set(id, { ...product, product_id: id });
     }
     pagesRead++;
+    // 每页交给调用方落盘，后续验证阻挡不能丢掉已读取的商品。
+    await onPage({ products: [...products.values()], coverage: { pages_read: pagesRead, products_collected: products.size, total, pagination_complete: false, period_days: period, historical_coverage_complete: false, reason: '商品分页采集中' } });
     if (total !== null && products.size >= total) { complete = true; break; }
     if (pagesRead > 1 && products.size === before) { reason = '商品分页重复，已停止'; break; }
     controls = await safeEval(page, goodsControls);

@@ -1,0 +1,4 @@
+interface:
+  display_name: "FastMoss 数据助手"
+  short_description: "后台查找达人与商品，分析店铺、直播和投流ROI，生成可追溯报告"
+  default_prompt: "使用 $fassmoss-skill 从已登录的 FastMoss 网页按我的条件采集和分析数据，默认后台运行，保留来源、周期与未知项。"

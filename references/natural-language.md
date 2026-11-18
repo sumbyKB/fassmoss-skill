@@ -1,97 +1,50 @@
-# 大白话 → 命令 路由手册
+# 大白话到命令
 
-本 skill 的目标：**业务用大白话说要什么，就自动拆解成对应命令抓取 FastMoss 数据**。这里定义「大白话关键词 → 子命令」的映射，供 AI 拆解用户意图时参考。
+只加载本任务相关参考，先保留用户的国家、人数、周期和条件。命令示例从技能根目录运行；文件路径换成用户本批次路径。不要把一句业务话拆成不存在的 CLI 参数。
 
-## 任务入口（全部通过 `fastmoss-rpa.mjs` 驱动）
+## 场景路由
 
-| 能力 | 子命令 | 分析脚本 | 抓什么 |
-|---|---|---|---|
-| 达人 | `search` / `pipeline` | `analyze.mjs` | 达人搜索、达人详情（视频/直播/商品/店铺） |
-| 商品榜 | `product` | `analyze-product.mjs` | 商品销售榜（品类/品牌/价格带） |
-| 新品榜 | `new-products` | 列表自带（近7天/趋势进详情补抓） | 新品榜（近期上架商品，三日销量/总销量） |
-| 商品投流ROI | `product-roi` | 命令内生成报告 | 逐个商品详情的投流分析：销售额 / 广告消耗 |
-| 店铺 | `shop` | `analyze-shop.mjs` | 店铺榜（品牌/分类/评分/GMV） |
-| 分类 | `categories` | — | 分类名 → 分类 ID 映射 |
-
-## 大白话 → 命令映射表
-
-### 达人场景（influencer）
-
-| 业务大白话 | 关键词 | 命令 |
+| 用户原话/目标 | 入口与参数示例 | 交付或后续 |
 |---|---|---|
-| 「找泰国箱包达人，粉丝2千~5万」 | 达人/博主/influencer/粉丝/类目 | `pipeline --country 泰国 --follower 2000,50000 --category 7` |
-| 「找常做测评的达人」 | 测评/评测/开箱 | 同上 + 分析层测评识别 |
-| 「达人历史带货拆解」 | 历史带货/客单价/转化率 | `detail --ids ...` + `history_analysis.py` |
+| 美国包包达人、粉丝5000到5万、推荐10人 | `pipeline --country 美国 --follower 5000,50000 --category 7 --top 10 --out-dir outputs/creators` | 运行 `analyze.mjs --dir outputs/creators --top 10`；只对已核实条件给推荐，未核实报价单列 |
+| 已有达人ID，要看历史表现 | `detail --country 美国 --ids <字符串ID> --out outputs/creators/details.json` | [历史证据](history-workflow.md)，不要把 details.json 直接当 evidence.json |
+| 这款商品适合哪些达人 | `product-creators --country 美国 --url <商品详情链接> --follower 5000,50000 --top 20` | 指定竞品加peer-ids；页面原始口径，报价未知 |
+| 箱包最近有哪些新品起量 | `new-opportunities --country 美国 --category 箱包 --scan 30 --top 10` | 任意类目近7天趋势与规则分；不是爆款概率 |
+| 竞品店铺比上次新增/调价了什么 | `competitor-diff --country 美国 --shop-id <店铺ID> --pages 3` | 首次建采样基线，后续自动对照；不将未观察当下架 |
+| 美区手机壳新品榜10个 | `new-products --country 美国 --category 手机壳 --pages 3 --out outputs/new-cases/newproducts.json` | 三级分类匹配，名称复核后取10；不足则按本任务范围继续翻页并披露实际数量 |
+| 上述新品还要近7天销量趋势 | `analyze-phonecase-trend.mjs --dir outputs/new-cases --new-only --top 10` | 逐个详情补抓，随后 `render-phonecase-report.mjs --file outputs/new-cases/result.json`；不额外要求销量榜 |
+| 手机壳销量榜和新品榜一起比较 | `product --country 美国 --category 手机壳 --days 7 --out outputs/cases/saleslist.json` + `new-products ... --out outputs/cases/newproducts.json` | 两榜齐全后 `analyze-phonecase-trend.mjs --dir outputs/cases`，只适用手机壳 |
+| 某分类销售、竞品品牌、价格带 | `product --country 泰国 --category 跑步鞋 --days 7 --out outputs/sales/products.json` | `analyze-product.mjs --dir outputs/sales --category 跑步鞋 --brand <店铺名>`；按实际榜单周期交付 |
+| 搜商品投流ROI、GMV除广告费 | `product-roi --country 美国 --keyword earbuds --top 5 --period 28 --out outputs/roi/product-roi.json` | 自动出JSON与同名Markdown；只读商品投流分析模块 |
+| 已有商品名单要投流ROI | `product-roi --country 美国 --ids-file products.json --period 28` | 支持字符串ID；文件输入未给top时采全部 |
+| 某类目榜单前10的投流ROI | `category-roi --country 美国 --category 手机壳 --top 10 --period 28 --days 7` | 榜单周期和投流周期分别披露，已匹配平台分类不再用中文词排掉英文商品 |
+| 精确近30天投流ROI | 暂不执行28天替代 | 告知页面支持7/28/90，询问用户选择；未答复不做依赖该选择的采集 |
+| 哪些商品最近带货视频多 | `hot-video --country 美国 --category 手机壳 --pages 3 --out outputs/video/hotvideo.json` | `render-hot-video-report.mjs --file outputs/video/hotvideo.json --top 10`；仅样本内排序 |
+| 找某类热门视频和TikTok链接 | `video --country 美国 --keyword "phone case" --top 10 --out outputs/video/videos.json` | 单条视频明细；与按商品汇总的hot-video区分 |
+| 店铺榜、评分4.5以上 | `shop --country 泰国 --category 箱包 --rating 4.5 --out outputs/shops/shops.json` | `analyze-shop.mjs --dir outputs/shops --min-rating 4.5` |
+| 某店铺全面看一遍 | `shop-detail-report --country 泰国 --shop <店铺名> --out outputs/shop/detail.json` | 搜索→详情→报告；已知ID可用shop-id跳过搜索 |
+| 店铺近30天对上30天涨跌 | `shop-trend --country 泰国 --shop <店铺名> --days 30 --out outputs/shop/trend.json` | 两个完整等长周期才比较；受阻保留已读商品和覆盖状态 |
+| 同品类前10店铺比较 | `shop-compare --country 泰国 --category 运动鞋 --top 10` | 样本商品汇总GMV，不能声称全站店铺排名 |
+| 挖竞品店铺带货达人 | `shop-authors --country 泰国 --shop <店铺名> --top 20` | 店铺内贡献口径，不等于全平台表现 |
+| 店铺品类、达人和成交结构 | `shop-insight --country 泰国 --shop <店铺名>` | 多模块各自披露口径和缺项 |
+| 搜直播、看单场商品 | `live --country 美国 --keyword <关键词>` → `live-detail --country 美国 --id <直播ID>` | [直播流程](live-workflow.md)；不把全场GMV分摊给未知商品 |
+| 广告创意案例 | `ad --country 美国 --start <起始日期> --end <结束日期>` | 广告案例数据，不能替代商品ROI |
+| 切站或获取分类树 | `country 泰国` / `categories --country 泰国 --out outputs/categories.json` | 只有任务需要时运行，实际数量来自本次页面 |
 
-### 商品场景（product）
+采集命令统一打开项目独立 Chrome。
 
-| 业务大白话 | 关键词 | 命令 |
-|---|---|---|
-| 「近两周跑步鞋销售，按销售金额排」 | 细分品类/销售额/近两周 | `product --category-id 6 --days 14` + `analyze-product --category 运动鞋` |
-| 「美区手机壳新品榜」「看最近上架的商品」 | 新品榜/新品/新上架/三日销量 | `new-products --country 美国 --category-id 16 --category-id2 909064` |
-| 「美区手机壳销量榜」「看手机壳近7天销量」 | 手机壳/手机保护壳/三级分类 | `product --country 美国 --category 手机壳 --days 7`（自动匹配 l3_cid=601925） |
-| 「我们品牌和排名相近品牌对比」 | 品牌对比/竞品/排名相近 | `analyze-product --brand 品牌名 --nearby 5` |
-| 「区分价格带」 | 价格带/价位/价格段 | 内置 `TIERS` |
-| 「这些商品ROI怎么样」「GMV除以广告费」 | 商品ROI/投产/广告消耗 | `product-roi --ids-file products.json --period 28`；关键词搜索用 `product-roi --keyword earbuds --top 10 --period 28` |
-| 「看这些商品的销售额，再算投流ROI」 | 商品销售 + 商品ROI | `product` → `analyze-product.mjs` → `product-roi --ids-file brand-comparison.json --period 28`（只采集分析结果中的 topProducts） |
+## 不能直接硬筛的条件
 
-商品 ROI 必须逐个进入商品详情的「投流分析」，读取同周期的销售额与广告消耗；支持近7/28/90天。`ad` 的广告案例数据不能替代商品投流数据，商品总览与投流模块也不能混用金额。
+- 测评/开箱：从内容或视频证据判断；不能仅凭昵称贴标签。
+- 近30天挂车转化不错：先核实能否获取精确周期、订单/点击分母；GMV、销量或GPM仅能证明相应指标。
+- 人民币预算8000、视频和直播两种合作：分别核实报价来源、币种、形式和日期。无报价保持未知，不填估算作硬通过；换汇需注明来源与时间。
+- 竞品没给：可以先整理商品/店铺推广记录并请求目标品牌或ID，不自行指定竞品、不宣称付费合作。
+- 报价、点击转化、退货率、评论正文等缺失不会自动变成0；仍可交付已核实候选及待核实清单。
 
-### 店铺场景（shop）
+## 分类和周期
 
-| 业务大白话 | 关键词 | 命令 |
-|---|---|---|
-| 「泰国箱包店铺销售榜」 | 店铺/品牌/卖家 | `shop --country 泰国 --category 箱包` |
-| 「评分4.5以上的店铺」 | 评分/高分 | `shop --rating 4.5` 或 `analyze-shop --min-rating 4.5` |
-| 「店铺品牌对比」 | 品牌对比 | `analyze-shop --brand 品牌名` |
+分类匹配以 `lib/categories.mjs` 和本机当前 `categories.json` 为准：精确名称（包括三级）优先，别名其次；多个模糊候选不猜。仅给三级ID时补父级；冲突明确报错。分类缓存缺失且任务需要它才抓树。手机壳已有核验别名，但平台范围也可能含屏幕膜，纯手机壳再用名称规则复核。
 
-### 通用
+商品榜 `--days 1/7/14/30` 对应平台自然日/周/月榜，14和30都映射月榜，不是精确滚动天数。新品榜只有三日；商品投流 `--period 7/28/90`；店铺趋势 `--days 1..45`。不能将同名的days参数跨命令照搬。
 
-| 业务大白话 | 关键词 | 命令 |
-|---|---|---|
-| 「泰国站」 | 国家/地区 | `--country 泰国` |
-| 「近一周/近一个月」 | 时间 | `--days 7` / `--days 30` |
-
-商品投流 ROI 的周期使用 `--period 7/28/90`。上面的月榜参数用于商品销量榜，不用于商品投流 ROI；明确要求30天时先说明投流页面支持的周期，不自动替换。
-
-## 国家 → 币种（自动）
-
-| 国家 | `--country` | 币种 |
-|---|---|---|
-| 美国 | 美国/us | USD $ |
-| 泰国 | 泰国/th | THB ฿ |
-| 印尼 | 印尼 | IDR Rp |
-| 越南 | 越南 | VND ₫ |
-| 马来 | 马来西亚 | MYR RM |
-| 菲律宾 | 菲律宾 | PHP ₱ |
-| 日本 | 日本 | JPY ¥ |
-| 新加坡 | 新加坡 | SGD S$ |
-
-## 一级分类 ID（`categories` 命令抓完整分类树，含一二级 ID）
-
-`categories` 命令现在直接读 `/api/shop/V3/categoryInfo` 接口，**一次抓全 30 个一级 + 249 个二级分类（含 ID）**，稳定可靠。
-
-**分类自动匹配**：`product --category <大白话>` 会自动读 categories.json 做「同义词归一 → 精确匹配 → 模糊匹配」，映射到一级 `l1_cid` 或二级 `l2_cid`。常用同义词：
-
-| 业务大白话 | 自动映射到 |
-|---|---|
-| 跑步鞋/跑鞋 | 运动鞋（二级，l2_cid=834696） |
-| 护肤品/护肤 | 美容护肤（二级） |
-| 衣服/服装/女装 | 女装与女士内衣（一级） |
-| 包包/手袋 | 箱包（一级，l1_cid=7） |
-| 鞋子 | 鞋靴（一级，l1_cid=6） |
-| 手机/数码 | 手机与数码（一级） |
-| 家居/日用 | 居家日用（一级） |
-| 食品/零食 | 食品饮料（一级） |
-
-> 同义词表在 `scripts/rpa/lib/categories.mjs` 的 `CATEGORY_ALIASES` 常量里，可随时增补。
->
-> **三级分类**：`categories` 命令已从 `/api/live/filterInfo` 抓全三级树（30 一级 + 247 二级 + 2370 三级，含 ID），和一二级一样自动匹配。`--category 手机壳` → 保护壳、屏幕保护膜、皮肤（l3=601925）；`--category 移动电源` → 910728；也可显式 `--category-id3 601925`。
-
-## 通用执行流程（AI 拆解大白话后照此走）
-
-1. **解析**：国家、对象（达人/商品/店铺）、所需指标和周期；商品 ROI 另解析关键词、商品ID或已有清单，以及数量。
-2. **准备**：确认本次采集环境已登录。需要分类筛选时再运行 `categories`；商品 ROI 的关键词/ID/清单输入无需先抓分类树。
-3. **采集与计算**：商品 ROI 直接运行 `product-roi`；达人、商品销售榜、店铺分别选择对应入口。需要脱离终端时通过 `run-background.mjs` 启动，默认后台。
-4. **报告**：`product-roi` 已自动生成报告；其它任务按入口表运行对应 `analyze*.mjs`。同时要销量与 ROI 时，先生成销量分析，再以该结果的商品清单采集投流数据，两种周期分别披露。
-5. **核对并交付**：检查日志、JSON 中的状态和报告，不能把 PID 或进程启动成功当作采集完成。交付来源、周期、币种和未完成项，未知字段诚实标注。
+国家支持键和币种读取 `scripts/rpa/lib/config.mjs`，不要扩展出脚本不支持的缩写或将币种覆盖当作金额换算。每次采集确认实际站点；报告以本次元数据和页面币种为准。

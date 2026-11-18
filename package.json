@@ -1,0 +1,16 @@
+{
+  "name": "fassmoss-skill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FastMoss 网页采集与离线分析工具",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "setup": "node scripts/rpa/setup.mjs",
+    "doctor": "node scripts/rpa/doctor.mjs",
+    "login": "node scripts/rpa/login-window.mjs",
+    "rpa": "node scripts/rpa/fastmoss-rpa.mjs",
+    "test": "node --test scripts/rpa/cli.test.mjs scripts/rpa/data-rules.test.mjs scripts/rpa/lifecycle.test.mjs scripts/rpa/product-roi.test.mjs scripts/rpa/tracker.test.mjs scripts/rpa/shop-analysis.test.mjs scripts/rpa/workflow.test.mjs"
+  },
+  "dependencies": { "playwright": "1.65.1" }
+}

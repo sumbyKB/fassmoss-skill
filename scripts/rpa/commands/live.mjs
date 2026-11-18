@@ -1,9 +1,10 @@
+import { poolWithPage } from '../lib/pool.mjs';
 // 直播域命令：直播搜索(live)、直播详情(live-detail)。
 import fs from 'node:fs';
 import path from 'node:path';
 import { BASE, SKILL_ROOT, resolveCountry } from '../lib/config.mjs';
 import { log } from '../lib/cli.mjs';
-import { openBrowser, safeEval, assertLoggedIn, switchCountry } from '../lib/browser.mjs';
+import { openBrowser, safeEval, assertLoggedIn, switchCountry, assertPageAccess } from '../lib/browser.mjs';
 
 const LIVE_BASE = `${BASE}/live/search`;
 // 登录检测用店铺页（顶栏版本标识加载快，且比直播页更不易触发风控/崩溃）
@@ -76,7 +77,7 @@ export async function cmdLive(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `lives-${Date.now()}.json`);
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0], `${SHOP_BASE}`);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || null);
@@ -254,15 +255,18 @@ export async function cmdLiveDetail(opts) {
   const outFile = opts.out || (outDir ? null : path.join(SKILL_ROOT, 'outputs', `live-detail-${Date.now()}.json`));
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0], `${SHOP_BASE}`);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country).catch((e) => { log(`切国家失败（忽略）：${e.message}`); return null; }) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || null);
   const page = context.pages()[0];
 
-  const details = [];
-  for (const id of ids) {
+  let stopped;
+  const details = ids.map(live_id => ({ live_id, status: 'not_attempted' }));
+  await poolWithPage(context, ids, Number(opts.concurrency ?? 5), async (page, id, index) => {
+    try {
     await page.goto(`${BASE}/live/detail/${id}`, { waitUntil: 'domcontentloaded' });
+    await assertPageAccess(page);
     await waitLiveDetail(page);
     // 滚动触发商品列表懒加载
     await page.evaluate(async () => {
@@ -272,17 +276,28 @@ export async function cmdLiveDetail(opts) {
       window.scrollTo(0, 0);
     });
     await page.waitForTimeout(1000);
+    await assertPageAccess(page);
     const detail = await safeEval(page, LIVE_DETAIL_EXTRACT_FN);
-    details.push({ live_id: id, source: `${BASE}/live/detail/${id}`, ...detail });
+    details[index] = { live_id: id, source: `${BASE}/live/detail/${id}`, ...detail, status: 'ok' };
     log(`直播 ${id}：${detail.title || '?'} · GMV ${detail.overview.total_gmv || '?'} · 商品 ${detail.products.length} 个`);
-  }
+    } catch (error) {
+      const blocked = error.code === 'FASTMOSS_BLOCKED';
+      details[index] = { live_id: id, status: blocked ? 'blocked' : 'error', error: error.message };
+      if (blocked) throw error;
+    }
+  }, { firstPage: page }).catch(error => {
+    if (error.code !== 'FASTMOSS_BLOCKED') throw error;
+    stopped = error.message;
+  });
 
   const meta = {
     collected_at: new Date().toISOString(),
     country: country || null,
     currency,
     requested: ids.length,
-    ok: details.length,
+    ok: details.filter(detail => detail.status === 'ok').length,
+    status: stopped ? 'blocked' : details.every(detail => detail.status === 'ok') ? 'complete' : 'partial',
+    stopped_reason: stopped,
     timings: { launchMs, totalMs: Date.now() - t0 },
   };
 

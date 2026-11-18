@@ -37,3 +37,8 @@ export function findBrandIndex(rows, query, nameOf) {
   if (matches.length === 1) return matches[0].index;
   throw new Error('未找到指定品牌：' + query);
 }
+
+export function numericId(value, label) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new Error(label + ' 必须为完整数字字符串');
+  return value;
+}

@@ -79,7 +79,7 @@ export function renderPhonecaseReportHtml(r) {
   <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${esc(r.country || "未知")} 手机壳双榜趋势分析</title>
+  <title>${esc(r.country || "未知")} 手机壳${r.mode === 'new_only' ? '新品' : '双榜'}趋势分析</title>
   <style>
   :root{
     --up:#e5484d; --up-bg:#fdecec;
@@ -128,7 +128,7 @@ export function renderPhonecaseReportHtml(r) {
   </head>
   <body>
   <div class="wrap">
-    <h1>${esc(r.country || "未知")} 手机壳 · 双榜销量趋势</h1>
+    <h1>${esc(r.country || "未知")} 手机壳 · ${r.mode === 'new_only' ? '新品趋势（销量榜未请求）' : '双榜销量趋势'}</h1>
     <div class="meta">采集时间 ${esc((r.collected_at || '').slice(0, 19).replace('T', ' '))} · 国家/币种 ${esc(r.country || "未知")} / ${esc(r.currency || "未知")}</div>
     <div><span class="chip">${esc(r.category || '')}</span></div>
 

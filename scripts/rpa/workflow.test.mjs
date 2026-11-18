@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { createRequire } from 'node:module';
+import { loadPlaywright, browserLaunchOptions } from './lib/runtime.mjs';
 import { fileURLToPath } from 'node:url';
 import { openProductBoard, buildProductUrl, grabProductPage } from './commands/product.mjs';
 import { resolveShopId, collectShopProducts } from './lib/shop.mjs';
@@ -10,9 +10,8 @@ import { readNinetyDayTrend } from './commands/shop-trend.mjs';
 
 let browser;
 before(async () => {
-  const require = createRequire(import.meta.url);
-  const { chromium } = require(path.join(fileURLToPath(new URL('../../', import.meta.url)), '.tools/node_modules/playwright'));
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const { chromium } = loadPlaywright();
+  browser = await chromium.launch({ ...browserLaunchOptions(), headless: true });
 });
 after(async () => browser?.close());
 async function pageFor(t) {

@@ -27,7 +27,7 @@ export function newProductOptions(opts) {
   if (country && opts.currency && opts.currency !== country.currency) throw new Error('--currency 与指定站点币种冲突');
   const outFile = path.resolve(opts.out || path.join(SKILL_ROOT, 'outputs', `new-products-${Date.now()}.json`));
   if (!outFile.toLowerCase().endsWith('.json')) throw new Error('--out 请使用 .json 文件名');
-  return { pages, top, categoryId, categoryId2, categoryId3, country, outFile };
+  return { pages, top, categoryId, categoryId2, categoryId3, country, outFile, category: opts.category || null, sort: opts.sort || null };
 }
 
 export function buildNewProductsUrl({ categoryId, categoryId2, categoryId3, sort, region, page = 1 } = {}) {
@@ -103,39 +103,34 @@ export async function grabNewProductPage(page, url, { timeout = 15000 } = {}) {
   throw new Error('新品榜数据未加载完成');
 }
 
-export async function cmdNewProducts(opts) {
-  const options = newProductOptions(opts);
-  const t0 = Date.now();
+function createBoardResult(options) {
   const meta = {
-    collected_at: new Date().toISOString(), country: options.country?.label ?? null, currency: options.country?.currency ?? null, region: null,
-    category: opts.category || null, category_id: options.categoryId, category_id2: options.categoryId2, category_id3: options.categoryId3,
-    sort: opts.sort || '默认（三日销量）', period_days: 3, data_end_date: null,
+    collected_at: new Date().toISOString(), country: options.country?.label ?? null, currency: options.country?.currency ?? null, region: options.country ? REGION_BY_LABEL[options.country.label] : null,
+    category: options.category || null, category_id: options.categoryId, category_id2: options.categoryId2, category_id3: options.categoryId3,
+    sort: options.sort || '默认（三日销量）', period_days: 3, data_end_date: null,
     pages_requested: options.pages, top_requested: options.top, pages_visited: 0, pages_ok: 0, page_errors: [], unique_products: 0, status: 'running',
     note: '列表三日口径不等于近7天；数据截止日未在页面确认时保持未知。', timings: {},
   };
+  return { meta, products: [] };
+}
+
+/** 读取已登录、已确认站点的新品榜；浏览器和文件生命周期由调用方管理。 */
+export async function collectNewProductBoard(page, options, { onPage = () => {} } = {}) {
+  if (!options.country) throw new Error('采集新品榜前必须确认站点');
+  const result = createBoardResult(options);
+  const { meta } = result;
+  const t0 = Date.now();
   const products = new Map();
   const save = () => {
+    result.products = [...products.values()];
     meta.unique_products = products.size;
     meta.timings.totalMs = Date.now() - t0;
-    fs.mkdirSync(path.dirname(options.outFile), { recursive: true });
-    fs.writeFileSync(options.outFile, JSON.stringify({ meta, products: [...products.values()] }, null, 2), 'utf8');
+    onPage(result);
   };
-  let context;
   save();
   try {
-    const browser = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
-    context = browser.context;
-    meta.timings.launchMs = browser.launchMs;
-    const page = context.pages()[0];
-    await assertLoggedIn(page, NEW_PRODUCTS_BASE);
-    const country = options.country ? await switchCountry(page, options.country.label) : await safeEval(page, labels => [...document.querySelectorAll('button')].map(node => node.innerText.trim()).find(text => labels.includes(text)) || null, COUNTRY_LABELS);
-    if (!country) throw new Error('无法确认新品榜站点，请传 --country');
-    meta.country = country;
-    meta.currency = resolveCountry(country).currency;
-    if (opts.currency && opts.currency !== meta.currency) throw new Error('--currency 与当前站点币种冲突');
-    meta.region = REGION_BY_LABEL[country];
     for (let number = 1; number <= options.pages; number++) {
-      const url = buildNewProductsUrl({ ...options, region: meta.region, sort: opts.sort, page: number });
+      const url = buildNewProductsUrl({ ...options, region: meta.region, sort: options.sort, page: number });
       meta.pages_visited++;
       try {
         const payload = await grabNewProductPage(page, url);
@@ -159,11 +154,42 @@ export async function cmdNewProducts(opts) {
     if (meta.status === 'running') meta.status = 'complete';
     save();
     if (meta.status === 'failed') throw new Error(meta.stopped_reason);
-    log(`new-products 完成：读取 ${meta.pages_visited} 页，成功 ${meta.pages_ok} 页，${meta.unique_products} 个商品，${meta.status}`);
-    return { meta, outFile: options.outFile };
+    return result;
   } catch (error) {
     meta.status = error.code === 'FASTMOSS_BLOCKED' ? 'blocked' : 'failed';
     meta.stopped_reason = error.message;
+    save();
+    throw error;
+  }
+}
+
+export async function cmdNewProducts(opts) {
+  const options = newProductOptions(opts);
+  const t0 = Date.now();
+  let result = createBoardResult(options);
+  let context, launchMs;
+  const save = () => {
+    result.meta.timings = { ...result.meta.timings, launchMs, totalMs: Date.now() - t0 };
+    fs.mkdirSync(path.dirname(options.outFile), { recursive: true });
+    fs.writeFileSync(options.outFile, JSON.stringify(result, null, 2), 'utf8');
+  };
+  save();
+  try {
+    const browser = await openBrowser();
+    context = browser.context;
+    launchMs = browser.launchMs;
+    const page = context.pages()[0];
+    await assertLoggedIn(page, NEW_PRODUCTS_BASE);
+    const country = options.country ? await switchCountry(page, options.country.label) : await safeEval(page, labels => [...document.querySelectorAll('button')].map(node => node.innerText.trim()).find(text => labels.includes(text)) || null, COUNTRY_LABELS);
+    if (!country) throw new Error('无法确认新品榜站点，请传 --country');
+    const actualCountry = resolveCountry(country);
+    if (opts.currency && opts.currency !== actualCountry.currency) throw new Error('--currency 与当前站点币种冲突');
+    result = await collectNewProductBoard(page, { ...options, country: actualCountry }, { onPage: data => { result = data; save(); } });
+    log('new-products 完成：' + result.meta.unique_products + ' 个商品，' + result.meta.status);
+    return { meta: result.meta, outFile: options.outFile };
+  } catch (error) {
+    result.meta.status = error.code === 'FASTMOSS_BLOCKED' ? 'blocked' : 'failed';
+    result.meta.stopped_reason = error.message;
     save();
     throw error;
   } finally { if (context) await context.close(); }

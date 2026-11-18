@@ -6,6 +6,7 @@ import { log } from '../lib/cli.mjs';
 import { openBrowser, safeEval, assertLoggedIn, switchCountry } from '../lib/browser.mjs';
 import { poolWithPage } from '../lib/pool.mjs';
 import { resolveCategoryOptions } from '../lib/categories.mjs';
+import { isPhoneCase } from '../lib/product-trend.mjs';
 import { parseAmount, parsePriceRange } from '../data-rules.mjs';
 import { productRoiOptions, searchProductRoiCandidates, scrapeProductRoi, renderProductRoiReport, PRODUCT_ROI_FORMULA } from '../product-roi.mjs';
 
@@ -47,10 +48,13 @@ async function waitProductRows(page, { timeout = 15000 } = {}) {
     () => {
       const t = [...document.querySelectorAll('table')].find((x) => (x.innerText || '').includes('所属店铺'));
       if (!t) return false;
+      if (t.closest('.ant-spin-blur, [aria-busy=true]')) return false;
       const rows = [...t.querySelectorAll('tbody tr')].filter(
         (r) => r.querySelectorAll('td').length >= 5 && (r.innerText || '').replace(/\s/g, '').length > 0
       );
-      return rows.length >= 1;
+      return rows.length > 0 || [...t.querySelectorAll('tbody .ant-empty, tbody .ant-table-placeholder')].some(
+        node => node.getClientRects().length > 0 && /暂无数据|没有数据|无数据|No data/i.test(node.innerText)
+      );
     },
     undefined,
     { timeout }
@@ -121,7 +125,7 @@ export async function cmdProduct(opts) {
   const pages = Number(opts.pages || 10);
   // 商品榜默认串行单窗口：每页仅 10 条、数据量小，并发加速意义不大；
   // 串行单窗口还能显著降低触发验证码风控的概率（连续并发开多 tab 易被反爬识别）。
-  const concurrency = Number(opts.concurrency || 1);
+  const concurrency = Number(opts.concurrency || 5);
   const days = opts.days ? Number(opts.days) : null;
   const dateType = Number(opts['date-type'] || dateTypeOf(days));
   const dateValue = opts['date-value'] || null;
@@ -130,7 +134,7 @@ export async function cmdProduct(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `products-${Date.now()}.json`);
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0]);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
@@ -216,7 +220,7 @@ export async function cmdProductRoi(opts) {
   if (!outFile.toLowerCase().endsWith('.json')) throw new Error('--out 请使用 .json 文件名');
   const reportFile = outFile.slice(0, -5) + '.md';
   const t0 = Date.now();
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   const page = context.pages()[0];
   await assertLoggedIn(page, `${BASE}/e-commerce/search`);
   const country = requestedCountry ? await switchCountry(page, requestedCountry.label) : await safeEval(page, (labels) => {
@@ -247,7 +251,7 @@ export async function cmdProductRoi(opts) {
   save();
   // 投流数据是接口一次性返回、不依赖懒加载列表，多 tab 并发抓取安全；但并发越高越易触发风控，默认 1（串行）。
   // 每个商品完成后立即落盘。
-  const concurrency = Math.min(Math.max(1, Number(opts.concurrency || 1)), products.length);
+  const concurrency = Math.min(Math.max(1, Number(opts.concurrency || 5)), products.length);
   await poolWithPage(context, products, concurrency, async (pg, product, i) => {
     // 遇到风控/权限阻挡后停止后续访问（保留已采集的部分结果，不再无谓触发风控）
     if (meta.stopped_reason) return product;
@@ -369,7 +373,7 @@ export async function cmdCategoryRoi(opts) {
   const reportFile = outFile.slice(0, -5) + '.md';
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   const page = context.pages()[0];
   await assertLoggedIn(page);
   const countryLabel = opts.country ? await switchCountry(page, opts.country) : await safeEval(page, (labels) => [...document.querySelectorAll('button')].map((e) => e.innerText.trim()).find((t) => labels.includes(t)) || null, COUNTRY_LABELS);
@@ -396,8 +400,10 @@ export async function cmdCategoryRoi(opts) {
   }
 
   // 过滤目标品类：关键词匹配 category 字段 + 商品名，按 rank 升序取前 top
-  const kw = category ? String(category).toLowerCase() : null;
-  const matched = board.filter((r) => !kw || (`${r.category || ''} ${r.product || ''}`).toLowerCase().includes(kw));
+  // 已用平台分类限定榜单时，不再要求英文商品名包含中文业务别名。
+  const kw = category && !boardLabel ? String(category).toLowerCase() : null;
+  const phoneOnly = ['手机壳', '手机保护壳', '保护壳'].includes(category);
+  const matched = board.filter((r) => phoneOnly ? isPhoneCase(r.product) : !kw || (`${r.category || ''} ${r.product || ''}`).toLowerCase().includes(kw));
   matched.sort((a, b) => (parseInt(a.rank) || 999999) - (parseInt(b.rank) || 999999));
   const picked = matched.slice(0, top).map((p) => ({ id: String(p.id), product: p.product, source_url: p.source_url || `${BASE}/e-commerce/detail/${p.id}`, _board: { rank: p.rank, shop: p.shop, category: p.category, price_raw: p.price_raw, week_units: p.units, week_gmv: p.gmv } }));
   log(`榜单抓到 ${board.length} 个商品，命中「${category || '全部'}」${matched.length} 个，取前 ${picked.length} 个抓 ROI`);
@@ -411,8 +417,9 @@ export async function cmdCategoryRoi(opts) {
   };
   save();
   // 投流 ROI 串行抓取（并发多 tab 后台降频会丢数据，串行最稳）；偶发超时自动重试 1 次，风控则立即停止。
-  for (let i = 0; i < products.length; i++) {
-    const item = products[i];
+  let stopped;
+  await poolWithPage(context, products, Number(opts.concurrency ?? 5), async (page, item, i) => {
+    if (stopped) return;
     let result = null;
     let blocked = false;
     for (let attempt = 0; attempt < 2 && !result; attempt++) {
@@ -427,8 +434,8 @@ export async function cmdCategoryRoi(opts) {
     products[i] = result;
     save();
     log(`商品投流 ${i + 1}/${products.length}：${result.id}，${result.status}，ROI=${result.roi ?? '未知'}`);
-    if (blocked) break;
-  }
+    if (blocked) stopped = true;
+  }, { firstPage: page });
   log(`写出 ${outFile} / ${reportFile}`);
   await context.close();
   return { meta: { country: countryLabel, currency, category, top: picked.length, roi_calculated: products.filter((p) => p.status === 'ok').length }, outFile, reportFile };

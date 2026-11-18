@@ -1,9 +1,10 @@
+import { poolWithPage } from '../lib/pool.mjs';
 // 视频域命令：视频搜索(video)，抓视频列表 + 逐条进详情页拿 TikTok 链接 + 视频类型。
 import fs from 'node:fs';
 import path from 'node:path';
 import { BASE, SKILL_ROOT, resolveCountry } from '../lib/config.mjs';
 import { log } from '../lib/cli.mjs';
-import { openBrowser, assertLoggedIn, switchCountry } from '../lib/browser.mjs';
+import { openBrowser, assertLoggedIn, switchCountry, assertPageAccess } from '../lib/browser.mjs';
 
 const VIDEO_BASE = `${BASE}/media-source/video`;
 const SHOP_BASE = `${BASE}/shop-marketing/search`;
@@ -54,7 +55,7 @@ export async function cmdVideo(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `videos-${Date.now()}.json`);
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0], `${SHOP_BASE}`);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country).catch((e) => { log(`切国家失败（忽略）：${e.message}`); return null; }) : null;
   const page = context.pages()[0];
@@ -92,13 +93,16 @@ export async function cmdVideo(opts) {
     }
   }
 
-  // 逐个进详情页拿 TikTok 链接 + 视频类型（串行，取前 topN 条）
+  // 按榜单顺序保留样本，独立读取视频详情。
   const list = [...byId.values()].slice(0, topN);
   let linkedCount = 0;
-  for (const row of list) {
+  let stopped;
+  await poolWithPage(context, list, Number(opts.concurrency ?? 5), async (page, row) => {
     try {
       await page.goto(row.detail_url, { waitUntil: 'domcontentloaded' });
+      await assertPageAccess(page);
       await page.waitForTimeout(3500);
+      await assertPageAccess(page);
       const info = await page.evaluate(() => {
         const a = [...document.querySelectorAll('a')].find((x) => /tiktok\.com\/@/.test(x.href));
         const m = document.body.innerText.match(/视频类型[：:]\s*([^\n|]+)/);
@@ -107,8 +111,14 @@ export async function cmdVideo(opts) {
       row.tiktok_url = info.tiktok_url;
       row.video_type = info.video_type;
       if (info.tiktok_url) linkedCount++;
-    } catch (e) { row.tiktok_url = ''; row.video_type = ''; }
-  }
+    } catch (error) {
+      if (error.code === 'FASTMOSS_BLOCKED') throw error;
+      Object.assign(row, { tiktok_url: '', video_type: '', detail_error: error.message });
+    }
+  }, { firstPage: page }).catch(error => {
+    if (error.code !== 'FASTMOSS_BLOCKED') throw error;
+    stopped = error.message;
+  });
 
   const meta = {
     collected_at: new Date().toISOString(),
@@ -117,6 +127,8 @@ export async function cmdVideo(opts) {
     pages_requested: pages,
     unique_videos: byId.size,
     linked: linkedCount,
+    status: stopped ? 'blocked' : list.some(row => row.detail_error) ? 'partial' : 'complete',
+    stopped_reason: stopped,
     timings: { launchMs, crawlMs: Date.now() - t0 - launchMs, totalMs: Date.now() - t0 },
   };
 

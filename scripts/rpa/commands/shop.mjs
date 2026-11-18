@@ -52,10 +52,13 @@ async function waitShopRows(page, { timeout = 15000 } = {}) {
     () => {
       const t = [...document.querySelectorAll('table')].find((x) => (x.innerText || '').includes('店铺信息'));
       if (!t) return false;
+      if (t.closest('.ant-spin-blur, [aria-busy=true]')) return false;
       const rows = [...t.querySelectorAll('tbody tr')].filter(
         (r) => r.querySelectorAll('td').length >= 3 && (r.innerText || '').replace(/\s/g, '').length > 0
       );
-      return rows.length >= 2;
+      return rows.length > 0 || [...t.querySelectorAll('tbody .ant-empty, tbody .ant-table-placeholder')].some(
+        node => node.getClientRects().length > 0 && /暂无数据|没有数据|无数据|No data/i.test(node.innerText)
+      );
     },
     undefined,
     { timeout }
@@ -87,7 +90,7 @@ async function grabShopPage(page, url) {
 export async function cmdShop(opts) {
   const pages = Number(opts.pages || 10);
   // 店铺榜默认串行单窗口（同商品榜：数据量小 + 降低风控）
-  const concurrency = Number(opts.concurrency || 1);
+  const concurrency = Number(opts.concurrency || 5);
   const sort = opts.sort || null;
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `shops-${Date.now()}.json`);
   const t0 = Date.now();
@@ -104,7 +107,7 @@ export async function cmdShop(opts) {
     }
   }
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   await assertLoggedIn(context.pages()[0]);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;
   const currency = country ? resolveCountry(country).currency : (opts.currency || 'USD');
@@ -319,7 +322,7 @@ export async function cmdShopDetail(opts) {
   const outFile = opts.out || path.join(SKILL_ROOT, 'outputs', `shop-detail-${(shopName || shopId).replace(/[^\w.-]/g, '_')}-${Date.now()}.json`);
   const t0 = Date.now();
 
-  const { context, launchMs } = await openBrowser({ headed: opts.headed === true || opts.headed === 'true' });
+  const { context, launchMs } = await openBrowser();
   // 用店铺搜索页做登录检测（达人搜索页偶发风控，店铺页稳定；采集默认无界面，验证页面需人工处理）
   await assertLoggedIn(context.pages()[0], `${SHOP_BASE}`);
   const country = opts.country ? await switchCountry(context.pages()[0], opts.country) : null;

@@ -3,7 +3,7 @@
 用户想「看细分品类销售、和竞品品牌对比、分价格带」，用大白话描述即可，本技能负责拆解成**变量**并填进命令执行。核心链路：
 
 ```bash
-# 1. 抓商品榜（国家 + 时间；分类在分析层过滤）
+# 1. 抓商品榜（国家 + 时间；优先用分类树限定榜单，分析层再细分）
 node scripts/rpa/fastmoss-rpa.mjs product --country 泰国 --days 14 --pages 20 --out outputs/<批次>/products.json
 
 # 2. 分析：细分品类 + 品牌对比 + 价格带
@@ -19,7 +19,7 @@ node scripts/rpa/analyze-product.mjs --dir outputs/<批次> --category 跑步鞋
 | **国家** | 泰国 / 美国 / 印尼 | `--country` | 无（必填，影响币种） | 自动切站+币种（泰国=THB） |
 | **一级分类** | 鞋靴 / 箱包 / 美妆个护 | `--category-id` | 无（=综合榜） | 一级分类 ID（l1_cid），精确筛选 |
 | **细分品类** | 跑步鞋 / 运动鞋 | `--category` | 无 | 按「商品分类/商品名」关键词过滤（在一级分类内进一步过滤） |
-| **时间范围** | 近两周 / 近一周 / 近一月 | `--days` | 1 | 1日榜/7周榜/14月榜/30月榜 |
+| **时间范围** | 近两周 / 近一周 / 近一月 | `--days` | 1 | 1→日榜、7→周榜、14/30→月榜；不是精确滚动天数 |
 | **本品牌** | 我们品牌 / BOSTANTEN | `--brand` | 无 | =所属店铺名 |
 | **竞品范围** | 排名相近的 | `--nearby` | 5 | 本品牌前后各 N 名 |
 | **分析条数** | Top20 | `--top` | 20 | 品类榜展示条数 |
@@ -44,7 +44,7 @@ node scripts/rpa/analyze-product.mjs --dir outputs/<批次> --category 运动鞋
 
 **已知一级分类 ID（泰国站，2026-11-09 实测）**：美妆个护=14、鞋靴=6、箱包=7、居家日用=10、食品饮料=24、汽车与摩托车=23。完整映射见 `categories` 命令产出。
 
-> 「跑步鞋」在 FastMoss 里没有独立分类，对应的是「鞋靴(6)」下的「运动鞋/休闲运动鞋」。所以筛跑步鞋 = `--category-id 6`（鞋靴）+ `--category 运动鞋`。
+> 分类优先匹配当前完整分类树中的精确名称，包括三级「跑步鞋」；只有旧树没有三级时才使用别名对应的二级运动鞋。不要用另一条分支的一级ID与二级运动鞋ID拼接。
 
 ## 大白话 → 参数映射
 
@@ -77,7 +77,7 @@ FastMoss 商品分类是三级（一级→二级→三级），**三级都支持
 
 - **一级**：`--category-id` → `l1_cid`（鞋靴=6、箱包=7、美妆个护=14 等）。
 - **二级**：`--category-id2` → `l2_cid`（如 运动鞋=834696、手机配件=909064）。
-- **三级**：`--category-id3` → `l3_cid`（如 手机壳=601925）。`categories` 命令已从 `/api/live/filterInfo` 抓全三级树（30 一级 + 247 二级 + 2370 三级，含 ID）到 `categories.json` 的 `l3_categories`，和一二级一样自动匹配；`--category 手机壳` / `--category 移动电源` 直接可用。
+- **三级**：`--category-id3` → `l3_cid`（如 手机壳=601925）。`categories` 命令通过视频商品榜页面自然响应采集当前三级树（实际数量以本次结果为准）到 `categories.json` 的 `l3_categories`，和一二级一样自动匹配；`--category 手机壳` / `--category 移动电源` 直接可用。
 - UI 点击 Cascader 可能触发腾讯验证码（平台反爬），本技能不绕过验证码；优先用 URL 参数（`--category-id` / `--category-id2` / `--category-id3`）而非点 UI。
 
 ## 边界
@@ -106,11 +106,13 @@ node scripts/rpa/fastmoss-rpa.mjs new-products --country 美国 --category-id 16
 
 ```text
 node scripts/rpa/analyze-phonecase-trend.mjs --dir outputs/phonecase --top 50
+# 只分析新品时，不需要额外采销量榜
+node scripts/rpa/analyze-phonecase-trend.mjs --dir outputs/phonecase --new-only --top 10
 node scripts/rpa/render-phonecase-report.mjs --file outputs/phonecase/result.json
 node scripts/rpa/render-phonecase-report-html.mjs --file outputs/phonecase/result.json
 ```
 
-输入为该目录的 `saleslist.json` 与 `newproducts.json`，需要包含国家与币种；也可传 `--sales`、`--new-products`、`--country`、`--out`。只有明确要求前台观察时加 `--headed true`。旧结果没有近7天周期/逐日证据时，报告将原有趋势标为未知；国家、榜单日期、数量与缺失原因均由数据生成，不沿用固定的11条/5条结论。
+采集命令统一打开项目独立 Chrome。
 
 ## 商品投流 ROI
 
@@ -135,7 +137,7 @@ node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --ids 17321984218
 - 必须等待「投流分析」自己的周期选中且数据刷新；其它模块的周期和金额不构成本模块依据。模块没有日期输入时记录原始周期标签，日期数组留空。
 - 取指标卡第一个数值，不误取「日均」。保存 `raw.gmv` / `raw.ad_spend` / `raw.platform_roas` 原文与解析数值；`roi` 是重算值，`platform_roas` 是页面显示值。
 - 输出指定 JSON 和同名 `.md`，每个商品完成即保存。记录成功、缺指标、失败、网页阻挡与尚未采集；遇到登录、验证或权限上限停止后续访问并保留部分结果。
-- 默认无界面；用户要求前台演示时才加 `--headed true`。`run-background.mjs product-roi ...` 固定后台，不自动弹窗。
+采集命令统一打开项目独立 Chrome。
 
 已前台核对示例：美国 INSONIXN 耳机（ID `1732198421819330715`），近28天投流销售额 `$6.11万` / 广告消耗 `$2.76万`，计算 ROI `2.2138`（展示2.21），平台 ROAS `2.22`。缩写金额有舍入，两个结果都保留，不用 ROAS 反推 GMV。商品总览的 `$13.80万` 是另一口径，不参与这个计算。
 
@@ -148,9 +150,39 @@ node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --ids 17321984218
 ```text
 node scripts/rpa/fastmoss-rpa.mjs product --country 美国 --days 7 --pages 1 --out outputs/product-sales/products.json
 node scripts/rpa/analyze-product.mjs --dir outputs/product-sales --top 10
-node scripts/rpa/run-background.mjs product-roi --country 美国 --ids-file outputs/product-sales/brand-comparison.json --period 28 --out outputs/product-sales/product-roi.json
+node scripts/rpa/fastmoss-rpa.mjs product-roi --country 美国 --ids-file outputs/product-sales/brand-comparison.json --period 28 --out outputs/product-sales/product-roi.json
 ```
 
 销量分析的 `brand-comparison.json` 会在 `topProducts` 保留商品字符串ID和详情链接，后续只对这些选中的商品逐个采集投流数据。两个报告分别保留销量榜与投流分析的原始周期，不把销量榜金额拿来充当投流 GMV。
 
 旧版 `brand-comparison.json` 若没有商品ID/链接，先用原始 `products.json` 重新运行销量分析；不要通过商品名称模糊匹配补ID。原始文件也缺ID和链接时，需要重新从商品页采集。
+
+## 品类 ROI 一条龙（榜单 → 过滤目标品类 → 逐个投流ROI → 优势报告）
+
+用户要「某国家、某类目、排名前N 的产品 ROI + 各自优势 + 链接」时，直接用 `category-roi` 一条命令跑完整链路，无需再手动拼「product 抓榜 → 过滤 → product-roi 抓投流」三步。以后只需改几个变量即可复用。
+
+```bash
+# 美区耳机前10：影音设备(909320)榜单内按「耳机」过滤，近7天榜，抓近28天投流ROI
+node scripts/rpa/fastmoss-rpa.mjs category-roi --country 美国 --category-id2 909320 --category 耳机 --top 10 --days 7 --pages 6 --period 28 --out outputs/<批次>/耳机前10ROI.json
+```
+
+变量清单（改一个词即复用）：
+
+| 变量 | 参数 | 默认 | 说明 |
+|---|---|---|---|
+| 国家 | `--country` | 美国 | 自动切站+币种 |
+| 榜单层级 | `--category-id` / `--category-id2` | 无 | 一级/二级分类 ID，限定榜单范围（耳机→影音设备 909320） |
+| 目标品类 | `--category` | 无 | 榜内按 category 字段+商品名过滤的关键词（如「耳机」）；能命中分类树时自动用作榜单筛选 |
+| 取前N | `--top` | 10 | 目标品类前 N 名 |
+| 榜单周期 | `--days` | 7 | 1/7/14/30（日/周/月榜） |
+| 抓几页 | `--pages` | 6 | 榜单页数，需足够凑齐 N 个目标品类 |
+| ROI 周期 | `--period` | 28 | 7/28/90 |
+| 排序 | `--sort` | gmv | 榜单排序 |
+
+产出 JSON + 同名 `.md`。报告使用当前样本可计算的ROI区间、规模、榜单销量、标价与店铺分布生成标签，并保留商品详情链接；不由这些字段推断利润、行业竞争阶段或固定的低价/高价路线。显式 `--date-value` 必须在页面生效，否则停止；榜单与ROI周期分别披露。
+
+采集命令统一打开项目独立 Chrome。
+
+本地建库、检索和档案工具见 [references/local-pool.md](local-pool.md)。自然语言由本技能拆解并在网页核验，脚本的有限规则解析不替代全条件验证。每批网页证据转为标准JSON后入库，保留历史快照和缺失字段。
+
+通过用户已登录的浏览器操作 FastMoss，不要求 API。先读当前页面，再填写筛选条件，验证生效后整理结果。不要把页面可读误报为自动搜索已经完成。

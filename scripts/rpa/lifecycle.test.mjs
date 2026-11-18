@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { browserLaunchOptions } from './lib/runtime.mjs';
 import { analyzeShopDetail } from './analyze-shop-detail.mjs';
 import { COMMAND_NAMES, HANDLERS, main } from './fastmoss-rpa.mjs';
 import { activeContexts } from './lib/browser.mjs';
@@ -34,20 +34,9 @@ test('every command finishes or fails before its browser contexts close', async 
   }
 });
 
-test('every command module requires an explicit headed opt-in', () => {
-  const dir = new URL('./commands/', import.meta.url);
-  const files = readdirSync(dir).filter((f) => f.endsWith('.mjs'));
-  let calls = 0;
-  for (const f of files) {
-    const source = readFileSync(new URL('./commands/' + f, import.meta.url), 'utf8');
-    const matches = [...source.matchAll(/await openBrowser\(\{([^}]+)\}\)/g)];
-    calls += matches.length;
-    for (const [, args] of matches) assert.match(args, /headed: opts\.headed === true \|\| opts\.headed === 'true'/, f);
-  }
-  assert.ok(calls >= 10, `openBrowser 调用数不足：${calls}`);
-  const launcher = readFileSync(new URL('./run-background.mjs', import.meta.url), 'utf8');
-  assert.match(launcher, /COMMAND_NAMES/);
-  assert.match(launcher, /'--headed', 'false'/);
+test('collection uses the project Chrome window', () => {
+  assert.equal(browserLaunchOptions().headless, false);
+  assert.equal(browserLaunchOptions().channel, 'chrome');
 });
 
 test('shop detail report uses input currency and preserves missing data', () => {

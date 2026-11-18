@@ -1,3 +1,5 @@
+换电脑安装与故障处理见 [新电脑使用说明](../../references/installation.md)。依赖由根目录 package.json/package-lock.json 锁定，登录、采集和校验均复用 lib/runtime.mjs。
+
 # FastMoss RPA 代码架构说明
 
 本目录是 FastMoss 网页数据采集的 RPA 实现，通过已登录的浏览器操作页面 DOM，不接入 FastMoss API、不导出 Cookie。
@@ -27,6 +29,7 @@ scripts/rpa/
 |---|---|---|
 | `config.mjs` | 路径常量、国家/币种映射、region 映射 | `BASE` `SKILL_ROOT` `PROFILE_DIR` `COUNTRIES` `COUNTRY_LABELS` `REGION_BY_LABEL` `resolveCountry` |
 | `cli.mjs` | 命令行参数解析、时间戳日志 | `parseArgs` `log` |
+| `runtime.mjs` | Node/锁定依赖检查、启动前浏览器配置 | `assertNodeVersion` `loadPlaywright` `browserLaunchOptions` |
 | `browser.mjs` | 浏览器生命周期、登录检测、国家切换 | `openBrowser` `safeEval` `assertLoggedIn` `switchCountry` `activeContexts` `enableImages` |
 | `pool.mjs` | 并发执行池（通用 + 页面复用） | `pool` `poolWithPage` |
 | `categories.mjs` | 分类名 → 分类 ID 匹配 | `CATEGORY_ALIASES` `resolveCategoryId` |
@@ -40,6 +43,9 @@ scripts/rpa/
 | 文件 | 命令 | 说明 |
 |---|---|---|
 | `product.mjs` | `product` `product-roi` `category-roi` | 商品榜 / 商品投流ROI / 品类ROI一条龙 |
+| `product-creators.mjs` | `product-creators` | 商品/指定竞品关联达人，周期与来源分列 |
+| `new-opportunities.mjs` | `new-opportunities` | 任意分类新品近7天趋势与规则排序 |
+| `competitor-diff.mjs` | `competitor-diff` | 商品/达人/视频快照和变化对照，保护自动基线 |
 | `new-products.mjs` | `new-products` | 新品榜三日数据，ID去重、分页状态、分类核验与部分结果保存 |
 | `influencer.mjs` | `search` `detail` `pipeline` | 达人搜索 / 达人详情 / 达人一条龙 |
 | `shop.mjs` | `shop` `shop-detail` `shop-detail-report` | 店铺榜 / 店铺详情 / 店铺详情报告 |
@@ -60,14 +66,14 @@ scripts/rpa/
 - 多数 `analyze*.mjs` 为离线分析脚本（读已抓取的JSON出报告）；需要补抓的脚本在下方单独注明。
 - `analyze-phonecase-trend.mjs`：包含详情补抓，默认使用无界面浏览器，不能当纯离线脚本；输入目录可配置。`lib/product-trend.mjs` 为它与两种报告共用的纯趋势规则。
 - `render-phonecase-report*.mjs`：读取 `--file` 或 `--dir` 指定的结果，动态生成报告；导入模块不会执行CLI或开启浏览器。
-- `login-window.mjs` / `run-background.mjs` / `setup.mjs`：登录窗口、后台启动器、playwright 安装器。
+采集命令统一打开项目独立 Chrome。
 
 ## 三、新增一个命令的步骤（只改一处）
 
-命令清单以 `fastmoss-rpa.mjs` 的 `HANDLERS` 为**唯一权威来源**，`run-background.mjs` 和测试都从它 import `COMMAND_NAMES`，不用重复维护清单。
+采集命令统一打开项目独立 Chrome。
 
 1. 在对应业务的 `commands/*.mjs` 里写 `export async function cmdXxx(opts) {...}`。
-   - 浏览器统一用 `openBrowser({ headed: opts.headed === true || opts.headed === 'true' })`（必须显式 headed 开关）。
+   - 浏览器统一用 `openBrowser()` 打开项目独立 Chrome。
    - 登录检测、国家切换、并发池、报告工具分别从 `lib/browser.mjs`、`lib/pool.mjs`、`lib/report.mjs` 复用，不要重写。
 2. 在 `fastmoss-rpa.mjs` 的 `HANDLERS` 里登记 `xxx: cmdXxx`（`COMMAND_NAMES` 自动同步）。
 3. 更新 `fastmoss-rpa.mjs` 顶部 `/** */` 注释块里的命令说明（否则 help 里看不到）。
@@ -76,7 +82,7 @@ scripts/rpa/
 
 ## 四、关键约定（务必遵守）
 
-1. **默认无界面，前台须显式选择**：所有 `openBrowser` 调用写成 `headed: opts.headed === true || opts.headed === 'true'`。验证、登录和权限阻挡快速报错并保存可用进度，不在后台等待人工或自动打开窗口。
+1. 采集统一使用项目独立 Chrome。遇到验证、登录或权限阻挡时保存可用进度。
 2. **浏览器上下文统一关闭**：命令函数自己 `await context.close()` 关闭（正常路径），`main` 的 `finally` 兜底关闭所有存活上下文。
 3. **并发要克制**：列表页可高并发（数据量小、SPA 缓存）；详情页（达人 4 表、商品投流）必须串行——后台 tab 被 Chromium 降频会导致懒加载丢数据，实测并发 3 丢约 40%。
 4. **金额解析**：页面金额有万/亿缩写，用 `parseAmount`（`data-rules.mjs`）；计算 ROI 与平台 ROAS 分别保留，不反推。
@@ -112,7 +118,7 @@ node --test scripts/rpa/cli.test.mjs scripts/rpa/data-rules.test.mjs scripts/rpa
 | 参数 | 含义 |
 |---|---|
 | `--country` | 国家站点（泰国/美国/印尼…，中英文名均可） |
-| `--headed` | 是否可见窗口（`true`/`false`，默认无界面） |
+
 | `--out` | 输出 JSON 路径（缺省自动生成到 outputs/） |
 
 ### 各搜索条件对应参数（按语义）
@@ -153,3 +159,9 @@ node --test scripts/rpa/cli.test.mjs scripts/rpa/data-rules.test.mjs scripts/rpa
 ### 新增命令时
 
 搜索条件一律写成 `opts.xxx`（或 `opts['xxx']`），在文件顶部注释里写明参数含义与示例；错误提示用占位符 `<店铺名>` 而非具体值。
+
+新增共享模块：`lib/product-detail.mjs` 负责同商品同周期逐日证据，旧手机壳脚本保留兼容导出；`linked-lists.mjs` 负责关联表、分页和周期响应核验；`creator-match.mjs`、`opportunities.mjs`、`competitor-diff.mjs` 各自封装纯业务规则；`task-output.mjs` 只做输入/产物保护。细节见 [三个重点工作流](../../references/priority-workflows.md)。
+
+商品输入ID/链接归一统一由 `lib/product-input.mjs` 维护，独立于ROI周期；纯ID校验在 `data-rules.mjs`。新品命令仅在产物快照上做评分，保存操作不修改采集对象。报告生成成功后才写产物，格式错误不会先覆盖已有JSON。
+
+`collectNewProductBoard(page, options, {onPage})` 只读已登录已选站点的榜单，不管理浏览器生命周期；`new-products` 与 `new-opportunities` 共享它，后者在线榜单到详情不重复启动浏览器。

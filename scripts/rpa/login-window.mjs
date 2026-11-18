@@ -1,26 +1,20 @@
 #!/usr/bin/env node
-/** 打开 FastMoss 供手动登录一次，登录态持久化到 .browser-profile/ */
-import path from 'node:path';
-import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+// 只有用户运行此入口才打开前台窗口；与采集共用依赖及独立登录目录。
+import { once } from 'node:events';
+import { BASE } from './lib/config.mjs';
+import { openBrowser } from './lib/browser.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SKILL_ROOT = path.resolve(__dirname, '../..');
-const require = createRequire(import.meta.url);
-const { chromium } = require(path.join(SKILL_ROOT, '.tools/node_modules/playwright'));
-
-const ctx = await chromium.launchPersistentContext(path.join(SKILL_ROOT, '.browser-profile'), {
-  channel: 'chrome',
-  headless: false,
-  viewport: { width: 1440, height: 900 },
-  args: [
-    '--disable-blink-features=AutomationControlled',
-    '--no-first-run',
-    '--disable-background-timer-throttling',
-    '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding',
-  ],
-});
-const page = ctx.pages()[0] || (await ctx.newPage());
-await page.goto('https://www.fastmoss.com/zh', { waitUntil: 'domcontentloaded' });
-console.log('浏览器已打开，请在窗口里登录 FastMoss。登录完成后可直接关闭本窗口（登录态已持久化）。');
+let context;
+try {
+  ({ context } = await openBrowser({ allowImages: true }));
+  const closed = once(context, 'close');
+  const page = context.pages()[0] || await context.newPage();
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+  console.log('请在打开的窗口人工登录 FastMoss。登录完成后关闭整个窗口，登录态仅保存在本机；然后再运行采集。');
+  await closed;
+} catch (error) {
+  console.error('登录窗口失败：', error.message);
+  process.exitCode = 1;
+} finally {
+  if (context) await context.close();
+}

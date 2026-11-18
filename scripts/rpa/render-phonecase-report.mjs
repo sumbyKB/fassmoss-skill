@@ -12,9 +12,10 @@ export function renderPhonecaseReport(r) {
   const short = value => { const text = String(value || ''); return text.length > 60 ? text.slice(0, 60) + '…' : text; };
   const link = row => row.source_url ? `[详情](${row.source_url})` : '未知';
   const lines = [
-    `# ${esc(r.country)} 手机壳双榜销量趋势`, '',
+    `# ${esc(r.country)} 手机壳${r.mode === 'new_only' ? '新品' : '双榜销量'}趋势`, '',
     `采集时间：${esc(r.collected_at)}；国家/币种：${esc(r.country)} / ${esc(r.currency)}；状态：${esc(r.status)}。`, '',
     `筛选：${esc(r.category)}。实际销量榜样本 ${salesRows.length} 件、新品榜样本 ${newRows.length} 件。`, '',
+    ...(r.mode === 'new_only' ? ['本任务仅采新品；销量榜未请求，不作为零销量或缺数结论。', ''] : []),
     '## 数据口径', '',
     `- 销量榜：date_type=${esc(r.saleslist?.date_type)}，date_value=${esc(r.saleslist?.date_value)}；销量为该榜单周期，环比按平台显示值分级。`,
     '- 新品榜列表为三日口径。近7天销量和趋势从详情页同一完整近7天逐日序列计算，不跨榜单日期相减。',

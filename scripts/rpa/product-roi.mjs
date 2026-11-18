@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { normalizeProductRows } from './lib/product-input.mjs';
 import { parseAmount } from './data-rules.mjs';
 import { assertPageAccess as assertPageAvailable } from './lib/browser.mjs';
 export { pageAccessBlocker as productPageBlocker } from './lib/browser.mjs';
@@ -26,20 +27,9 @@ export function productRoiOptions(opts) {
     if (typeof ids !== 'string') throw new Error('--ids 需要商品ID');
     rows = ids.split(',').map(id => id.trim());
   }
-  const products = new Map();
-  for (const row of rows) {
-    const value = typeof row === 'object' && row !== null ? row : { id: row };
-    if (typeof value.id === 'number' && !Number.isSafeInteger(value.id)) throw new Error('商品ID必须使用字符串，数字ID已失去精度');
-    const link = value.source_url ?? value.href;
-    const url = link ? new URL(link, BASE + '/') : null;
-    const linkedId = url?.pathname.match(/^\/zh\/e-commerce\/detail\/(\d+)\/?$/)?.[1];
-    if (url && (url.origin !== 'https://www.fastmoss.com' || !linkedId)) throw new Error('商品来源必须是 FastMoss 商品详情链接');
-    const id = String(value.id ?? linkedId ?? '');
-    if (!/^\d+$/.test(id) || (linkedId && linkedId !== id)) throw new Error('商品ID缺失或与详情链接不一致');
-    if (!products.has(id)) products.set(id, { id, product: value.product ?? value.name ?? null, source_url: `${BASE}/detail/${id}` });
-  }
-  if (!keyword && !products.size) throw new Error('商品列表为空');
-  return { period, keyword: keyword?.trim() ?? null, pages: Number(opts.pages ?? 1), top: Number(opts.top ?? (keyword ? 10 : products.size)), products: [...products.values()] };
+  const products = normalizeProductRows(rows);
+  if (!keyword && !products.length) throw new Error('商品列表为空');
+  return { period, keyword: keyword?.trim() ?? null, pages: Number(opts.pages ?? 1), top: Number(opts.top ?? (keyword ? 10 : products.length)), products };
 }
 
 export async function searchProductRoiCandidates(page, { keyword, pages, top }) {
@@ -137,10 +127,11 @@ async function waitProductAds(page, period) {
   throw new Error('商品投流模块未加载完成或周期未确认');
 }
 
-export async function scrapeProductRoi(page, product, { period, currency }) {
+export async function scrapeProductRoi(page, product, { period, currency, navigate = true }) {
   const target = new URL(product.source_url);
   if (target.origin !== 'https://www.fastmoss.com' || target.pathname !== `/zh/e-commerce/detail/${product.id}`) throw new Error('商品来源必须是与ID一致的 FastMoss 商品详情链接');
-  await page.goto(product.source_url, { waitUntil: 'domcontentloaded' });
+  if (navigate) await page.goto(product.source_url, { waitUntil: 'domcontentloaded' });
+  else if (new URL(page.url()).origin !== target.origin || new URL(page.url()).pathname !== target.pathname) throw new Error('复用页面与目标商品不一致');
   await page.waitForFunction(() => document.querySelector('a[href="#putData"]') || /正在保护|进一步确认|游客身份|已达.*上限/.test(document.body.innerText));
   await assertPageAvailable(page);
   // 详情页是 SPA，锚点很早就出现在 DOM 里，但 React 尚未完成渲染；此时点击「投流分析」tab 切换无效，
@@ -157,7 +148,7 @@ export async function scrapeProductRoi(page, product, { period, currency }) {
     const origin = new URL(page.url()).origin;
     const [response] = await Promise.all([
       page.waitForResponse(r => r.ok() && new URL(r.url()).origin === origin && ['xhr', 'fetch'].includes(r.request().resourceType()), { timeout: 15000 }),
-      page.locator('#putData').getByRole('radio', { name: `近${period}天`, exact: true }).check(),
+      page.locator('#putData').getByText(`近${period}天`, { exact: true }).first().click(),
     ]);
     if (await response.finished()) throw new Error('商品投流周期刷新请求失败');
     await page.waitForLoadState('networkidle', { timeout: 15000 });

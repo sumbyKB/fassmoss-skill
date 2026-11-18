@@ -1,6 +1,6 @@
 # 历史带货表现：页面采集与拆解
 
-本模块由技能通过当前浏览器读取页面，脚本负责确定性计算。没有独立爬虫，不需要FastMoss API，也不持久化登录凭证。
+本模块通过网页流程读取证据，Python脚本只做离线计算，不接FastMoss API。RPA登录态由本机独立 .browser-profile 保存，不写进报告或分享包。
 
 ## 入口与条件
 
@@ -23,7 +23,7 @@ python scripts/history_analysis.py outputs/<批次>/evidence.json --output outpu
 
 ## 证据输入契约
 
-真实示例：`outputs/2026-11-09-history-aidana/evidence.json`。顶层必填creator_id、source_url、collected_at、currency、period、coverage。records每项必须有kind(video/live)、字符串id、source_url、period、currency。period/currency必须与批次一致，混合周期分批分析。数字未知填null或省略，不填0。
+历史样本不随分享包分发；按下面契约由本批真实网页证据生成输入，不能拿旧样本当本轮采集。顶层必填creator_id、source_url、collected_at、currency、period、coverage。records每项必须有kind(video/live)、字符串id、source_url、period、currency。period/currency必须与批次一致，混合周期分批分析。数字未知填null或省略，不填0。
 
 可选gmv、units、views、orders、clicks、refund_orders。保留对应的 `*_raw` 和范围说明。只有确认订单、点击、退款及GMV是同一归因周期/范围时才设置 `denominators_verified: true`；确认views与GMV范围一致才设置 `views_scope_verified: true`。绝不能为获得输出而默认设置这两个标志。
 
